@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('claimrAPI', {
   getAllGames: () => ipcRenderer.invoke('store:get-all-games'),
+  getEpicGames: () => ipcRenderer.invoke('store:get-epic-games'),
+  getGogGame: () => ipcRenderer.invoke('store:get-gog-game'),
   checkAuth: (opts) => ipcRenderer.invoke('store:check-auth', opts),
   loginEpic: () => ipcRenderer.invoke('store:login-epic'),
   loginGog: () => ipcRenderer.invoke('store:login-gog'),

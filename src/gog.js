@@ -275,6 +275,91 @@ export async function checkGogGiveaway(page) {
 }
 
 /**
+ * Ultra-fast SSR HTML fetcher for GOG giveaways (~400ms).
+ * Avoids spawning a heavy Chromium instance unless strictly necessary.
+ */
+export async function fetchGogGiveawayFast() {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch('https://www.gog.com/en', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    const giveawayIdx = html.indexOf('id="giveaway"');
+    if (giveawayIdx === -1) {
+      return { active: false };
+    }
+
+    const snippet = html.substring(giveawayIdx, giveawayIdx + 8000);
+    const linkMatch = snippet.match(/href=["'](https:\/\/www\.gog\.com\/[a-z]{2}\/game\/[a-zA-Z0-9_-]+|https:\/\/www\.gog\.com\/game\/[a-zA-Z0-9_-]+|\/game\/[a-zA-Z0-9_-]+)/i);
+    const altMatch = snippet.match(/alt=["'](.*?)(\s+giveaway)?["']/i);
+    const imgMatch = snippet.match(/srcset=["']([^"']+)["']/i);
+
+    let title = null;
+    if (altMatch && altMatch[1]) {
+      title = altMatch[1].replace(/\s+giveaway/i, '').trim();
+    }
+
+    let link = linkMatch ? (linkMatch[1].startsWith('/') ? `https://www.gog.com${linkMatch[1]}` : linkMatch[1]) : null;
+
+    if (!title && link) {
+      const slugMatch = link.match(/\/game\/([a-zA-Z0-9_-]+)/);
+      if (slugMatch) {
+        title = slugMatch[1].replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+    }
+
+    if (!title && !link) {
+      return { active: false };
+    }
+
+    let thumbnail = null;
+    if (imgMatch) {
+      thumbnail = imgMatch[1].split(',')[0].split(' ')[0].trim();
+    }
+
+    return {
+      active: true,
+      title: title || 'GOG Promotional Freebie',
+      thumbnail: thumbnail || 'https://images.gog-statics.com/948360d0e110622fdbdab367732dc1a3004fd51bad991bada0e95a1f9acb8ccf_giveaway_465w.jpg',
+      url: link || 'https://www.gog.com/en',
+      isAlreadyClaimed: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fast giveaway retriever: uses fast HTTP fetch first, falls back to headless browser only if necessary.
+ */
+export async function getGogGiveawayFastOrBrowser() {
+  const fast = await fetchGogGiveawayFast();
+  if (fast) return fast;
+
+  try {
+    const gogContext = await launchGogBrowser({ headless: true });
+    const gogPage = gogContext.pages().length > 0 ? gogContext.pages()[0] : await gogContext.newPage();
+    await gogPage.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded', timeout: 8000 });
+    await new Promise(r => setTimeout(r, 1000));
+    const giveaway = await checkGogGiveaway(gogPage);
+    await gogContext.close();
+    return giveaway;
+  } catch (e) {
+    console.warn('GOG check notice:', e.message);
+    return { active: false, error: e.message };
+  }
+}
+
+/**
  * Checks whether a game title exists in the user's real GOG account library.
  */
 export async function isGameInGogLibrary(gameTitle, { profileDir } = {}) {

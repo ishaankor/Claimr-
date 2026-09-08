@@ -49,6 +49,32 @@ document.addEventListener('DOMContentLoaded', () => {
   let cachedStoreData = null;
   let isAutomatorRunning = false;
 
+  const CACHE_KEY = 'claimr_cached_promotions_v1';
+
+  function savePromotionsToCache(data) {
+    try {
+      if (data && (data.epic?.currentFreeGames?.length || data.epic?.upcomingFreeGames?.length || data.gog?.title)) {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+      }
+    } catch {}
+  }
+
+  function loadPromotionsFromCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && (parsed.epic || parsed.gog)) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // Instant 0ms render from cache if available
+  cachedStoreData = loadPromotionsFromCache();
+
   // -------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------
@@ -340,20 +366,65 @@ document.addEventListener('DOMContentLoaded', () => {
   // -------------------------------------------------------------
 
   async function loadGames({ forceFetch = false } = {}) {
-    if (forceFetch || !cachedStoreData) {
+    // Only display loading spinner if we have NO cached games to display
+    const hasExistingContent = !!(
+      cachedStoreData?.epic?.currentFreeGames?.length ||
+      cachedStoreData?.epic?.upcomingFreeGames?.length ||
+      cachedStoreData?.gog?.active
+    );
+
+    if (!hasExistingContent) {
       currentGamesGrid.innerHTML = '<div class="loading-state">Fetching active store offers...</div>';
       upcomingGamesGrid.innerHTML = '<div class="loading-state">Fetching upcoming games...</div>';
-
-      try {
-        cachedStoreData = await window.claimrAPI.getAllGames();
-      } catch (e) {
-        currentGamesGrid.innerHTML = `<div class="loading-state">Failed to load games: ${e.message}</div>`;
-        upcomingGamesGrid.innerHTML = '';
-        return;
-      }
     }
 
-    await renderGames();
+    try {
+      // 1. Fetch Epic Games (blazing fast ~120ms REST API)
+      const epicPromise = window.claimrAPI.getEpicGames
+        ? window.claimrAPI.getEpicGames()
+        : window.claimrAPI.getAllGames().then(res => res.epic);
+
+      // 2. Fetch GOG Giveaway in parallel (~400ms fast SSR check)
+      const gogPromise = window.claimrAPI.getGogGame
+        ? window.claimrAPI.getGogGame()
+        : Promise.resolve({ active: false });
+
+      // Progressive render: Render Epic games the instant they arrive (~120ms)
+      const epicResolvePromise = epicPromise.then(async (epicPromos) => {
+        if (epicPromos && (Array.isArray(epicPromos.currentFreeGames) || Array.isArray(epicPromos.upcomingFreeGames))) {
+          cachedStoreData = {
+            epic: epicPromos,
+            gog: cachedStoreData?.gog || { active: false },
+          };
+          savePromotionsToCache(cachedStoreData);
+          await renderGames();
+        }
+      }).catch(err => {
+        console.warn('Epic promotions notice:', err);
+      });
+
+      // Progressive render: When GOG resolves (~400ms), update current grid seamlessly
+      const gogResolvePromise = gogPromise.then(async (gogGiveaway) => {
+        if (gogGiveaway) {
+          cachedStoreData = {
+            epic: cachedStoreData?.epic || { currentFreeGames: [], upcomingFreeGames: [] },
+            gog: gogGiveaway,
+          };
+          savePromotionsToCache(cachedStoreData);
+          await renderGames();
+        }
+      }).catch(err => {
+        console.warn('GOG giveaway notice:', err);
+      });
+
+      // Await both settling
+      await Promise.allSettled([epicResolvePromise, gogResolvePromise]);
+    } catch (e) {
+      if (!hasExistingContent && !cachedStoreData) {
+        currentGamesGrid.innerHTML = `<div class="loading-state">Failed to load games: ${e.message}</div>`;
+        upcomingGamesGrid.innerHTML = '';
+      }
+    }
   }
 
   async function renderGames() {
@@ -764,8 +835,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial Load
   (async () => {
+    // 1. Instant 0ms render from cache if available
+    if (cachedStoreData) {
+      renderGames();
+    }
+
+    // 2. Fast auth status check (reads accounts.json in ~5ms)
     await refreshAuthStatus({ fast: true });
-    await loadGames({ forceFetch: true });
+
+    // 3. Re-render account badges with active account names
+    if (cachedStoreData) {
+      renderGames();
+    }
+
+    // 4. Progressively fetch fresh promotions (Epic in ~120ms, GOG in ~400ms)
+    await loadGames({ forceFetch: false });
     checkServiceStatus();
   })();
 });

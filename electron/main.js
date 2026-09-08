@@ -7,7 +7,7 @@ import { execSync } from 'child_process';
 import { getPromotions } from '../src/api.js';
 import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary } from '../src/claimer.js';
-import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary } from '../src/gog.js';
+import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
 import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount } from '../src/accounts.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -138,6 +138,55 @@ function createTray() {
 // IPC Handlers
 // -------------------------------------------------------------
 
+ipcMain.handle('store:get-epic-games', async () => {
+  try {
+    const epicPromos = await getPromotions().catch(e => {
+      console.warn('Epic promotions fetch notice:', e.message);
+      return { currentFreeGames: [], upcomingFreeGames: [] };
+    });
+
+    const history = loadHistory();
+    const activeEpic = getActiveAccount('epic');
+    if (activeEpic && Array.isArray(epicPromos?.currentFreeGames)) {
+      for (const game of epicPromos.currentFreeGames) {
+        if (!isGameClaimed(history, game, activeEpic.id)) {
+          isGameInEpicLibrary(game.storeUrl, { profileDir: activeEpic.profileDir }).then(isOwned => {
+            if (isOwned) {
+              const h = loadHistory();
+              recordClaim(h, game, 'in_library', activeEpic.id, activeEpic.username);
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('library:updated');
+              }
+            }
+          }).catch(() => {});
+        }
+      }
+    }
+
+    return epicPromos;
+  } catch (err) {
+    console.error('Error fetching Epic games:', err);
+    return { currentFreeGames: [], upcomingFreeGames: [] };
+  }
+});
+
+ipcMain.handle('store:get-gog-game', async () => {
+  try {
+    const gogGiveaway = await getGogGiveawayFastOrBrowser();
+
+    const history = loadHistory();
+    const activeGog = getActiveAccount('gog');
+    if (activeGog && gogGiveaway?.active && gogGiveaway?.isAlreadyClaimed) {
+      recordClaim(history, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
+    }
+
+    return gogGiveaway;
+  } catch (err) {
+    console.error('Error fetching GOG giveaway:', err);
+    return { active: false, error: err.message };
+  }
+});
+
 ipcMain.handle('store:get-all-games', async () => {
   try {
     const [epicPromos, gogGiveaway] = await Promise.all([
@@ -145,27 +194,13 @@ ipcMain.handle('store:get-all-games', async () => {
         console.warn('Epic promotions fetch notice:', e.message);
         return { currentFreeGames: [], upcomingFreeGames: [] };
       }),
-      (async () => {
-        let giveaway = { active: false };
-        try {
-          const gogContext = await launchGogBrowser({ headless: true });
-          const gogPage = gogContext.pages().length > 0 ? gogContext.pages()[0] : await gogContext.newPage();
-          await gogPage.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded', timeout: 8000 });
-          await new Promise(r => setTimeout(r, 1000));
-          giveaway = await checkGogGiveaway(gogPage);
-          await gogContext.close();
-        } catch (e) {
-          console.warn('GOG check notice:', e.message);
-          giveaway = { active: false, error: e.message };
-        }
-        return giveaway;
-      })(),
+      getGogGiveawayFastOrBrowser(),
     ]);
 
     // Sync detected real library status into history
     const history = loadHistory();
     const activeGog = getActiveAccount('gog');
-    if (activeGog && gogGiveaway.active && gogGiveaway.isAlreadyClaimed) {
+    if (activeGog && gogGiveaway?.active && gogGiveaway?.isAlreadyClaimed) {
       recordClaim(history, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
     }
 

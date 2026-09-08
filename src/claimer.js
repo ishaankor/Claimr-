@@ -3,18 +3,16 @@ import { CONFIG } from './config.js';
 import { isGameClaimed, recordClaim } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
-import { resolveBrowserOptions } from './browser.js';
+import { launchBrowserContext } from './browser.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Initializes the Playwright browser context using a persistent profile directory.
  */
-export async function launchBrowser({ headless = false, profileDir } = {}) {
+export async function launchBrowser({ headless = false, profileDir, log } = {}) {
   const targetDir = profileDir || getActiveProfileDir('epic');
-  const browserOpts = await resolveBrowserOptions();
-  const context = await chromium.launchPersistentContext(targetDir, {
-    ...browserOpts,
+  const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },
     userAgent: CONFIG.USER_AGENT,
@@ -24,7 +22,7 @@ export async function launchBrowser({ headless = false, profileDir } = {}) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
     ],
-  });
+  }, log);
 
   // Pre-seed cookies to bypass consent and mature age verification modals
   await context.addCookies([

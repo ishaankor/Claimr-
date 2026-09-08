@@ -4,7 +4,7 @@ import { CONFIG } from './config.js';
 import { loadHistory, recordClaim } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
-import { resolveBrowserOptions } from './browser.js';
+import { launchBrowserContext } from './browser.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -21,11 +21,9 @@ export const GOG_CONFIG = {
 /**
  * Launches persistent browser context for GOG.
  */
-export async function launchGogBrowser({ headless = false, profileDir } = {}) {
+export async function launchGogBrowser({ headless = false, profileDir, log } = {}) {
   const targetDir = profileDir || getActiveProfileDir('gog');
-  const browserOpts = await resolveBrowserOptions();
-  const context = await chromium.launchPersistentContext(targetDir, {
-    ...browserOpts,
+  const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },
     userAgent: CONFIG.USER_AGENT,
@@ -35,7 +33,7 @@ export async function launchGogBrowser({ headless = false, profileDir } = {}) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
     ],
-  });
+  }, log);
 
   await context.addCookies([
     {

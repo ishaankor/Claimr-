@@ -64,3 +64,45 @@ export async function resolveBrowserOptions(log = console.log) {
     return {};
   }
 }
+
+/**
+ * Launches a persistent browser context with automatic fallback and self-healing.
+ * If the selected browser is missing or fails to launch, automatically downloads
+ * Chromium in the background and retries.
+ * 
+ * @param {string} targetDir - User profile directory
+ * @param {Object} options - Browser launch options
+ * @param {Function} [log] - Logger function
+ * @returns {Promise<BrowserContext>}
+ */
+export async function launchBrowserContext(targetDir, options = {}, log = console.log) {
+  const browserOpts = await resolveBrowserOptions(log);
+  const finalOptions = { ...browserOpts, ...options };
+
+  try {
+    return await chromium.launchPersistentContext(targetDir, finalOptions);
+  } catch (err) {
+    const isMissingExec = err.message && (
+      err.message.includes("Executable doesn't exist") ||
+      err.message.includes('run the following command') ||
+      err.message.includes('Failed to launch')
+    );
+
+    if (isMissingExec) {
+      log?.('[Browser] Browser executable missing. Automatically installing Chromium engine...');
+      try {
+        const { registry } = require('playwright-core/lib/coreBundle');
+        await registry.installBrowsersForNpmInstall(['chromium']);
+        log?.('[Browser] Chromium engine successfully installed! Launching browser...');
+        
+        const fallbackOpts = { ...options };
+        delete fallbackOpts.channel;
+        return await chromium.launchPersistentContext(targetDir, fallbackOpts);
+      } catch (installErr) {
+        log?.(`[Browser] Auto-install failed: ${installErr.message}`);
+        throw installErr;
+      }
+    }
+    throw err;
+  }
+}

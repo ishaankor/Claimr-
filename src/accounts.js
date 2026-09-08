@@ -31,6 +31,43 @@ export function loadAccounts() {
       // Ensure required structure exists
       if (!data.epic) data.epic = { activeId: null, accounts: [] };
       if (!data.gog) data.gog = { activeId: null, accounts: [] };
+
+      // Automatically deduplicate accounts with identical usernames
+      let modified = false;
+      for (const store of ['epic', 'gog']) {
+        if (Array.isArray(data[store].accounts)) {
+          const seen = new Map();
+          const unique = [];
+          for (const acc of data[store].accounts) {
+            const key = (acc.username || acc.id || '').trim().toLowerCase();
+            if (seen.has(key)) {
+              // Found duplicate account! Keep the newest lastUsed time and profileDir
+              const prior = seen.get(key);
+              if (acc.lastUsed && (!prior.lastUsed || acc.lastUsed > prior.lastUsed)) {
+                prior.profileDir = acc.profileDir || prior.profileDir;
+                prior.lastUsed = acc.lastUsed;
+              }
+              if (data[store].activeId === acc.id) {
+                data[store].activeId = prior.id;
+              }
+              modified = true;
+            } else {
+              seen.set(key, acc);
+              unique.push(acc);
+            }
+          }
+          data[store].accounts = unique;
+          if (data[store].accounts.length > 0 && !data[store].accounts.some((a) => a.id === data[store].activeId)) {
+            data[store].activeId = data[store].accounts[0].id;
+            modified = true;
+          }
+        }
+      }
+
+      if (modified) {
+        saveAccounts(data);
+      }
+
       return data;
     }
   } catch (err) {
@@ -99,6 +136,7 @@ export function setActiveAccount(store, accountId) {
 
 /**
  * Registers or updates an account in the registry.
+ * Prevents duplicate accounts with the same username from being registered multiple times.
  */
 export function registerAccount(store, { id, username, profileDir }) {
   const data = loadAccounts();
@@ -106,11 +144,24 @@ export function registerAccount(store, { id, username, profileDir }) {
     data[store] = { activeId: null, accounts: [] };
   }
 
-  const existingIndex = data[store].accounts.findIndex((a) => a.id === id);
+  // 1. Check if matching by explicit ID
+  let existingIndex = data[store].accounts.findIndex((a) => a.id === id);
+
+  // 2. Prevent duplicate entries for the same username
+  if (existingIndex === -1 && username && username !== 'User' && username !== 'Epic User') {
+    const existingByNameIndex = data[store].accounts.findIndex((a) =>
+      a.username && a.username.trim().toLowerCase() === username.trim().toLowerCase()
+    );
+    if (existingByNameIndex !== -1) {
+      existingIndex = existingByNameIndex;
+    }
+  }
+
+  const effectiveId = existingIndex !== -1 ? data[store].accounts[existingIndex].id : id;
   const accountRecord = {
-    id,
+    id: effectiveId,
     username: username || 'User',
-    profileDir,
+    profileDir: profileDir || (existingIndex !== -1 ? data[store].accounts[existingIndex].profileDir : null),
     lastUsed: Date.now(),
   };
 
@@ -119,17 +170,17 @@ export function registerAccount(store, { id, username, profileDir }) {
       ...data[store].accounts[existingIndex],
       ...accountRecord,
     };
+    data[store].activeId = effectiveId;
   } else {
     data[store].accounts.push({
       ...accountRecord,
       createdAt: Date.now(),
     });
+    data[store].activeId = id;
   }
 
-  // Set newly added or updated account as active
-  data[store].activeId = id;
   saveAccounts(data);
-  return accountRecord;
+  return data[store].accounts[existingIndex !== -1 ? existingIndex : data[store].accounts.length - 1];
 }
 
 /**

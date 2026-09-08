@@ -20,58 +20,20 @@ const STEALTH_ARGS = [
  */
 export async function applyStealthScripts(context) {
   await context.addInitScript(() => {
-    // 1. Mask navigator.webdriver
+    // 1. Cleanly mask navigator.webdriver on Navigator.prototype if present
     try {
-      delete Object.getPrototypeOf(navigator).webdriver;
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
-      });
+      if (navigator.webdriver) {
+        Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
+          get: () => false,
+          configurable: true,
+        });
+      }
     } catch (e) {}
 
-    // 2. Ensure window.chrome runtime exists
+    // 2. Ensure window.chrome runtime exists cleanly without injecting deprecated/fake methods
     try {
       if (!window.chrome) {
         window.chrome = {};
-      }
-      if (!window.chrome.runtime) {
-        window.chrome.runtime = {};
-      }
-      window.chrome.loadTimes = function() {};
-      window.chrome.csi = function() {};
-      window.chrome.app = {};
-    } catch (e) {}
-
-    // 3. Mock navigator.plugins if empty
-    try {
-      if (!navigator.plugins || navigator.plugins.length === 0) {
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-          ],
-        });
-      }
-    } catch (e) {}
-
-    // 4. Mock navigator.languages
-    try {
-      if (!navigator.languages || navigator.languages.length === 0) {
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['en-US', 'en'],
-        });
-      }
-    } catch (e) {}
-
-    // 5. Mock permissions query
-    try {
-      if (window.navigator && window.navigator.permissions) {
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-          parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
       }
     } catch (e) {}
   });

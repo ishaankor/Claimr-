@@ -1,7 +1,7 @@
 {
   "name": "claimr",
   "productName": "Claimr",
-  "description": "",
+  "description": "Automated free game claimer and manager for Epic Games and GOG",
   "type": "module",
   "version": "1.0.0",
   "main": "electron/main.js",
@@ -46,7 +46,9 @@
     "linux": {
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"],
-      "category": "Game"
+      "category": "Game",
+      "maintainer": "Claimr Team <support@claimr.app>",
+      "desktopName": "claimr.desktop"
     },
     "files": [
       "**/*",
@@ -69,7 +71,7 @@
     "automation",
     "electron"
   ],
-  "author": "",
+  "author": "Claimr Team <support@claimr.app>",
   "license": "MIT",
   "dependencies": {
     "cheerio": "^1.0.0",

@@ -201,6 +201,22 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
     ignoreDefaultArgs: ['--enable-automation'],
   };
 
+  // Clean up any stale Chromium process locks in profile directory to prevent ProcessSingleton crashes
+  if (targetDir) {
+    try {
+      const resolvedDir = path.resolve(targetDir);
+      const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+      for (const lock of lockFiles) {
+        const lockPath = path.join(resolvedDir, lock);
+        if (fs.existsSync(lockPath)) {
+          try {
+            fs.unlinkSync(lockPath);
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
   let context;
   try {
     context = await chromium.launchPersistentContext(targetDir, launchConfig);

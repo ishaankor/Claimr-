@@ -324,18 +324,25 @@ export async function claimGame(page, game, history, { force = false, logger = c
  * Retrieves the display name of the currently authenticated Epic user.
  */
 export async function getEpicUsername(page) {
+  // 1. Primary: Fast direct session API (instant JSON response)
+  try {
+    const res = await page.request.get('https://www.epicgames.com/id/api/account', { timeout: 6000 });
+    if (res.ok()) {
+      const data = await res.json();
+      if (data && data.displayName && data.displayName.trim().length > 0) {
+        return data.displayName.trim();
+      }
+    }
+  } catch {}
+
+  // 2. Fallback: Check account portal
   try {
     if (!page.url().includes('accounts.epicgames.com/account/personal')) {
       await page.goto('https://accounts.epicgames.com/account/personal', {
         waitUntil: 'domcontentloaded',
-        timeout: 12000,
+        timeout: 8000,
       }).catch(() => {});
     }
-
-    await page.waitForFunction(() => {
-      const el = document.querySelector('input[name="displayName"], #displayName');
-      return el && el.value && el.value.trim().length > 0;
-    }, { timeout: 6000 }).catch(() => {});
 
     const input = page.locator('input[name="displayName"], #displayName');
     if (await input.count() > 0) {
@@ -344,6 +351,7 @@ export async function getEpicUsername(page) {
     }
   } catch {}
 
+  // 3. Fallback: Parse display name from EGS navigation if present
   try {
     const nav = page.locator('egs-navigation');
     if (await nav.count() > 0) {
@@ -351,6 +359,7 @@ export async function getEpicUsername(page) {
       if (name && name !== 'null') return name;
     }
   } catch {}
+
   return null;
 }
 

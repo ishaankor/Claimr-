@@ -1,9 +1,10 @@
 import { chromium } from 'playwright';
 import { CONFIG } from './config.js';
-import { isGameClaimed, recordClaim } from './history.js';
+import { isGameClaimed, recordClaim, loadHistory } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
 import { launchBrowserContext, handleCloudflareTurnstile } from './browser.js';
+import { getPromotions } from './api.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -402,6 +403,17 @@ export async function loginNewEpicAccount() {
     await sleep(2500);
     const username = (await getEpicUsername(page)) || `Epic User (${id.slice(-4)})`;
     const account = registerAccount('epic', { id, username, profileDir: relPath });
+
+    // Instantly check promotions and sync library while browser session is active
+    try {
+      const { currentFreeGames } = await getPromotions().catch(() => ({ currentFreeGames: [] }));
+      if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0) {
+        await syncEpicLibraryForAccount(currentFreeGames, account, { page });
+      }
+    } catch (e) {
+      console.warn('Post-login library sync notice:', e.message);
+    }
+
     return { success: true, account };
   } finally {
     await context.close();
@@ -428,26 +440,197 @@ export async function switchEpicAccount() {
 }
 
 /**
- * Checks whether a game is already owned in the user's Epic library by visiting its store URL.
+ * Synchronizes real Epic Games library status for active promotions in a single browser session.
+ * Queries Epic Games' authenticated order history API (~200ms JSON response, completely bypassing Cloudflare).
+ * @param {Array<Object>} games - Promotional games to check
+ * @param {Object} account - Epic account { id, username, profileDir }
+ * @param {Object} [options]
+ * @param {import('playwright').Page} [options.page] - Existing page if already open
+ * @returns {Promise<Array<Object>>} Array of games confirmed to be in library
  */
-export async function isGameInEpicLibrary(storeUrl, { profileDir } = {}) {
-  if (!storeUrl) return false;
-  const context = await launchBrowser({ headless: true, profileDir });
-  const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+export async function syncEpicLibraryForAccount(games, account, { page: existingPage } = {}) {
+  if (!account || !Array.isArray(games) || games.length === 0) return [];
 
+  const history = loadHistory();
+  const unclaimedGames = games.filter(g => !isGameClaimed(history, g, account.id));
+  if (unclaimedGames.length === 0) return [];
+
+  const checkOrdersAgainstGames = (orders) => {
+    const owned = [];
+    if (!Array.isArray(orders)) return owned;
+    for (const game of unclaimedGames) {
+      const isOwned = orders.some(order => (order.items || []).some(item => {
+        if (game.id && item.offerId && item.offerId.toLowerCase() === game.id.toLowerCase()) return true;
+        if (game.title && item.description && item.description.trim().toLowerCase() === game.title.trim().toLowerCase()) return true;
+        if (game.slug && item.description) {
+          const cleanDesc = item.description.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const cleanSlug = game.slug.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (cleanDesc && cleanSlug && (cleanDesc.includes(cleanSlug) || cleanSlug.includes(cleanDesc))) return true;
+        }
+        return false;
+      }));
+      if (isOwned) owned.push(game);
+    }
+    return owned;
+  };
+
+  const executeCheck = async (page) => {
+    let allOrders = [];
+    let pageNum = 1;
+    let nextPageToken = null;
+    while (pageNum <= 3) {
+      const url = nextPageToken
+        ? `https://accounts.epicgames.com/account/v2/payment/ajaxGetOrderHistory?sortDir=DESC&sortBy=DATE&nextPageToken=${encodeURIComponent(nextPageToken)}`
+        : `https://accounts.epicgames.com/account/v2/payment/ajaxGetOrderHistory?sortDir=DESC&sortBy=DATE&page=${pageNum}`;
+
+      const res = await page.request.get(url, { timeout: 6000 }).catch(() => null);
+      if (res && res.ok()) {
+        const data = await res.json().catch(() => null);
+        if (data && Array.isArray(data.orders)) {
+          allOrders = allOrders.concat(data.orders);
+          const found = checkOrdersAgainstGames(allOrders);
+          if (found.length === unclaimedGames.length) {
+            return found;
+          }
+          nextPageToken = data.nextPageToken;
+          if (!nextPageToken) break;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+      pageNum++;
+    }
+    return checkOrdersAgainstGames(allOrders);
+  };
+
+  let newlyOwned = [];
+  if (existingPage) {
+    newlyOwned = await executeCheck(existingPage);
+  } else {
+    let context = null;
+    try {
+      context = await launchBrowser({ headless: true, profileDir: account.profileDir });
+      const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+      newlyOwned = await executeCheck(page);
+    } catch (err) {
+      console.warn('Sync Epic library error:', err.message);
+    } finally {
+      if (context) await context.close().catch(() => {});
+    }
+  }
+
+  if (newlyOwned.length > 0) {
+    const freshHistory = loadHistory();
+    for (const game of newlyOwned) {
+      recordClaim(freshHistory, game, 'in_library', account.id, account.username);
+    }
+  }
+
+  return newlyOwned;
+}
+
+/**
+ * Checks whether a game is already owned in the user's Epic library.
+ * Primary: Queries Epic Games' authenticated order history API via fast JSON request (~200ms, bypasses Cloudflare).
+ * Fallback: Visits the store page CTA button in headless mode.
+ */
+export async function isGameInEpicLibrary(gameOrUrl, { profileDir, page: existingPage } = {}) {
+  if (!gameOrUrl) return false;
+
+  const targetTitle = typeof gameOrUrl === 'object' ? gameOrUrl.title : null;
+  const targetId = typeof gameOrUrl === 'object' ? gameOrUrl.id : null;
+  const targetSlug = typeof gameOrUrl === 'object'
+    ? gameOrUrl.slug
+    : (typeof gameOrUrl === 'string' ? gameOrUrl.split('/p/')[1]?.split('/')[0]?.split('?')[0] : null);
+
+  const checkOrdersMatch = (orders) => {
+    if (!Array.isArray(orders)) return false;
+    for (const order of orders) {
+      for (const item of (order.items || [])) {
+        if (targetId && item.offerId && item.offerId.toLowerCase() === targetId.toLowerCase()) {
+          return true;
+        }
+        if (targetTitle && item.description && item.description.trim().toLowerCase() === targetTitle.trim().toLowerCase()) {
+          return true;
+        }
+        if (targetSlug && item.description) {
+          const cleanDesc = item.description.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const cleanSlug = targetSlug.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (cleanDesc && cleanSlug && (cleanDesc.includes(cleanSlug) || cleanSlug.includes(cleanDesc))) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  const queryOrderHistory = async (page) => {
+    let pageNum = 1;
+    let nextPageToken = null;
+    while (pageNum <= 3) {
+      const url = nextPageToken
+        ? `https://accounts.epicgames.com/account/v2/payment/ajaxGetOrderHistory?sortDir=DESC&sortBy=DATE&nextPageToken=${encodeURIComponent(nextPageToken)}`
+        : `https://accounts.epicgames.com/account/v2/payment/ajaxGetOrderHistory?sortDir=DESC&sortBy=DATE&page=${pageNum}`;
+
+      const res = await page.request.get(url, { timeout: 6000 }).catch(() => null);
+      if (res && res.ok()) {
+        const data = await res.json().catch(() => null);
+        if (data && Array.isArray(data.orders)) {
+          if (checkOrdersMatch(data.orders)) {
+            return true;
+          }
+          nextPageToken = data.nextPageToken;
+          if (!nextPageToken) break;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+      pageNum++;
+    }
+    return false;
+  };
+
+  if (existingPage) {
+    try {
+      return await queryOrderHistory(existingPage);
+    } catch (e) {
+      console.warn('Epic library check on existing page failed:', e.message);
+      return false;
+    }
+  }
+
+  let context = null;
   try {
-    await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    const cta = page.locator('button[data-testid="purchase-cta-button"]');
-    await cta.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
-    if (await cta.count() > 0) {
-      const text = (await cta.first().innerText()).trim().toUpperCase();
-      return text.includes('IN LIBRARY') || text.includes('VIEW IN LIBRARY') || text.includes('OWNED');
+    const targetDir = profileDir || getActiveProfileDir('epic');
+    context = await launchBrowser({ headless: true, profileDir: targetDir });
+    const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+
+    const isOwned = await queryOrderHistory(page);
+    if (isOwned) return true;
+
+    const storeUrl = typeof gameOrUrl === 'string' ? gameOrUrl : gameOrUrl?.storeUrl;
+    if (storeUrl) {
+      await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
+      const cta = page.locator('button[data-testid="purchase-cta-button"]');
+      await cta.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+      if (await cta.count() > 0) {
+        const text = (await cta.first().innerText()).trim().toUpperCase();
+        if (text.includes('IN LIBRARY') || text.includes('VIEW IN LIBRARY') || text.includes('OWNED')) {
+          return true;
+        }
+      }
     }
   } catch (err) {
     console.warn('Epic library check notice:', err.message);
   } finally {
-    await context.close();
+    if (context) await context.close().catch(() => {});
   }
   return false;
 }
+
 

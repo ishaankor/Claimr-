@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { getPromotions } from '../src/api.js';
 import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
-import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary } from '../src/claimer.js';
+import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary, syncEpicLibraryForAccount } from '../src/claimer.js';
 import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
 import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount } from '../src/accounts.js';
 
@@ -145,22 +145,13 @@ ipcMain.handle('store:get-epic-games', async () => {
       return { currentFreeGames: [], upcomingFreeGames: [] };
     });
 
-    const history = loadHistory();
     const activeEpic = getActiveAccount('epic');
-    if (activeEpic && Array.isArray(epicPromos?.currentFreeGames)) {
-      for (const game of epicPromos.currentFreeGames) {
-        if (!isGameClaimed(history, game, activeEpic.id)) {
-          isGameInEpicLibrary(game.storeUrl, { profileDir: activeEpic.profileDir }).then(isOwned => {
-            if (isOwned) {
-              const h = loadHistory();
-              recordClaim(h, game, 'in_library', activeEpic.id, activeEpic.username);
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('library:updated');
-              }
-            }
-          }).catch(() => {});
+    if (activeEpic && Array.isArray(epicPromos?.currentFreeGames) && epicPromos.currentFreeGames.length > 0) {
+      syncEpicLibraryForAccount(epicPromos.currentFreeGames, activeEpic).then(newlyOwned => {
+        if (newlyOwned.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('library:updated');
         }
-      }
+      }).catch(() => {});
     }
 
     return epicPromos;
@@ -205,20 +196,12 @@ ipcMain.handle('store:get-all-games', async () => {
     }
 
     const activeEpic = getActiveAccount('epic');
-    if (activeEpic && Array.isArray(epicPromos?.currentFreeGames)) {
-      for (const game of epicPromos.currentFreeGames) {
-        if (!isGameClaimed(history, game, activeEpic.id)) {
-          isGameInEpicLibrary(game.storeUrl, { profileDir: activeEpic.profileDir }).then(isOwned => {
-            if (isOwned) {
-              const h = loadHistory();
-              recordClaim(h, game, 'in_library', activeEpic.id, activeEpic.username);
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('library:updated');
-              }
-            }
-          }).catch(() => {});
+    if (activeEpic && Array.isArray(epicPromos?.currentFreeGames) && epicPromos.currentFreeGames.length > 0) {
+      syncEpicLibraryForAccount(epicPromos.currentFreeGames, activeEpic).then(newlyOwned => {
+        if (newlyOwned.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('library:updated');
         }
-      }
+      }).catch(() => {});
     }
 
     return {
@@ -313,26 +296,23 @@ ipcMain.handle('accounts:swap', async (_event, { store, accountId }) => {
   (async () => {
     try {
       if (store === 'gog' && target) {
-        const isOwned = await isGameInGogLibrary('State of Mind', { profileDir: target.profileDir });
-        if (isOwned) {
-          const h = loadHistory();
-          recordClaim(h, { id: 'gog_State of Mind', title: 'State of Mind', slug: 'gog' }, 'in_library', target.id, target.username);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('library:updated');
+        const gogGiveaway = await getGogGiveawayFastOrBrowser().catch(() => null);
+        if (gogGiveaway?.active && gogGiveaway?.title) {
+          const isOwned = await isGameInGogLibrary(gogGiveaway.title, { profileDir: target.profileDir });
+          if (isOwned) {
+            const h = loadHistory();
+            recordClaim(h, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', target.id, target.username);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('library:updated');
+            }
           }
         }
       } else if (store === 'epic' && target) {
-        const { currentFreeGames } = await getPromotions();
-        const h = loadHistory();
-        for (const game of currentFreeGames || []) {
-          if (!isGameClaimed(h, game, target.id)) {
-            const isOwned = await isGameInEpicLibrary(game.storeUrl, { profileDir: target.profileDir });
-            if (isOwned) {
-              recordClaim(h, game, 'in_library', target.id, target.username);
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('library:updated');
-              }
-            }
+        const { currentFreeGames } = await getPromotions().catch(() => ({ currentFreeGames: [] }));
+        if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0) {
+          const newlyOwned = await syncEpicLibraryForAccount(currentFreeGames, target);
+          if (newlyOwned.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('library:updated');
           }
         }
       }
@@ -344,7 +324,7 @@ ipcMain.handle('accounts:swap', async (_event, { store, accountId }) => {
   return { success: true, activeAccount: target, accounts: loadAccounts() };
 });
 
-ipcMain.handle('store:verify-real-library', async (_event, { store, accountId, title, url } = {}) => {
+ipcMain.handle('store:verify-real-library', async (_event, { store, accountId, title, url, id } = {}) => {
   try {
     const history = loadHistory();
     if (store === 'GOG' || store === 'gog') {
@@ -352,16 +332,28 @@ ipcMain.handle('store:verify-real-library', async (_event, { store, accountId, t
       if (activeGog && title) {
         const isOwned = await isGameInGogLibrary(title, { profileDir: activeGog.profileDir });
         if (isOwned) {
-          recordClaim(history, { id: `gog_${title}`, title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
+          recordClaim(history, { id: id || `gog_${title}`, title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('library:updated');
+          }
           return { isOwned: true };
         }
       }
     } else if (store === 'EPIC' || store === 'epic') {
       const activeEpic = accountId ? loadAccounts().epic.accounts.find(a => a.id === accountId) : getActiveAccount('epic');
-      if (activeEpic && url) {
-        const isOwned = await isGameInEpicLibrary(url, { profileDir: activeEpic.profileDir });
+      if (activeEpic) {
+        const gameObj = {
+          id: id || title,
+          title: title,
+          slug: url ? url.split('/p/')[1]?.split('/')[0]?.split('?')[0] || url.split('/').pop() : title,
+          storeUrl: url,
+        };
+        const isOwned = await isGameInEpicLibrary(gameObj, { profileDir: activeEpic.profileDir });
         if (isOwned) {
-          recordClaim(history, { id: title, title, slug: url.split('/').pop() }, 'in_library', activeEpic.id, activeEpic.username);
+          recordClaim(history, gameObj, 'in_library', activeEpic.id, activeEpic.username);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('library:updated');
+          }
           return { isOwned: true };
         }
       }
@@ -376,9 +368,19 @@ ipcMain.handle('accounts:add', async (_event, { store }) => {
   console.log(`➕ Initiating new ${store} account login...`);
   if (store === 'epic') {
     const res = await loginNewEpicAccount();
+    if (res && res.success) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('library:updated');
+      }
+    }
     return { ...res, accounts: loadAccounts() };
   } else {
     const res = await loginNewGogAccount();
+    if (res && res.success) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('library:updated');
+      }
+    }
     return { ...res, accounts: loadAccounts() };
   }
 });
@@ -408,11 +410,22 @@ ipcMain.handle('store:login-epic', async () => {
     });
     if (ok) {
       const username = (await getEpicUsername(page)) || 'Epic User';
-      const active = getActiveAccount('epic');
+      let active = getActiveAccount('epic');
       if (active) {
-        registerAccount('epic', { ...active, username });
+        active = registerAccount('epic', { ...active, username });
       } else {
-        registerAccount('epic', { id: 'default', username, profileDir: '.profile' });
+        active = registerAccount('epic', { id: 'default', username, profileDir: '.profile' });
+      }
+      try {
+        const { currentFreeGames } = await getPromotions().catch(() => ({ currentFreeGames: [] }));
+        if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0) {
+          const newlyOwned = await syncEpicLibraryForAccount(currentFreeGames, active, { page });
+          if (newlyOwned.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('library:updated');
+          }
+        }
+      } catch (e) {
+        console.warn('Post-login library sync error:', e.message);
       }
     }
     return { success: !!ok };

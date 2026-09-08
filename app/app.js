@@ -503,8 +503,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Verify real store library for any games marked unclaimed
       if (unclaimedGames.length > 0 && window.claimrAPI.verifyRealLibrary) {
-        unclaimedGames.forEach(g => {
-          window.claimrAPI.verifyRealLibrary({ store: g.store, title: g.title, url: g.url }).catch(() => {});
+        unclaimedGames.forEach(async (g) => {
+          try {
+            const res = await window.claimrAPI.verifyRealLibrary({
+              store: g.store,
+              title: g.title,
+              url: g.url,
+              id: g.id,
+              accountId: g.store === 'EPIC' ? currentAuth?.epicActiveId : currentAuth?.gogActiveId,
+            });
+            if (res && res.isOwned) {
+              renderGames();
+            }
+          } catch {}
         });
       }
 

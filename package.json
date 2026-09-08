@@ -1,0 +1,90 @@
+{
+  "name": "claimr",
+  "productName": "Claimr",
+  "description": "",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "app": "node scripts/start-app.js",
+    "gui": "node scripts/start-app.js",
+    "start": "node index.js",
+    "claim": "node index.js",
+    "check": "node index.js --check",
+    "login": "node index.js --login:epic",
+    "login:epic": "node index.js --login:epic",
+    "login:gog": "node index.js --login:gog",
+    "headless": "node index.js --headless",
+    "service:install": "node scripts/service.js install",
+    "service:uninstall": "node scripts/service.js uninstall",
+    "service:status": "node scripts/service.js status",
+    "service:run": "node scripts/service.js run",
+    "service:logs": "node scripts/service.js logs",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
+    "dist:all": "electron-builder -mwl"
+  },
+  "build": {
+    "appId": "com.claimr.app",
+    "productName": "Claimr",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.games",
+      "icon": "assets/icon.icns",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "target": ["nsis", "portable"]
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": ["AppImage", "deb"],
+      "category": "Game"
+    },
+    "files": [
+      "**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,test,tests,example,examples}",
+      "!**/*.log",
+      "!.profile*",
+      "!accounts.json",
+      "!history.json",
+      "!*.py",
+      "!.git*",
+      "!dist/*"
+    ],
+    "asar": true
+  },
+  "keywords": [
+    "epic-games",
+    "gog",
+    "free-games",
+    "game-claimer",
+    "automation",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "chrome-cookies-secure": "^3.0.0",
+    "ghost-cursor": "^1.4.1",
+    "playwright": "^1.63.0",
+    "puppeteer": "^24.7.2",
+    "puppeteer-core": "^24.7.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "random-useragent": "^0.5.0",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3"
+  }
+}

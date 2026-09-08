@@ -1,0 +1,10 @@
+node_modules/
+.profile/
+.profile*/
+accounts.json
+history.json
+*.log
+dist/
+build/
+.DS_Store
+__pycache__/

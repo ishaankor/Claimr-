@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' https: data:; img-src 'self' https: data:; font-src 'self' data:;">
+  <title>Claimr - Free Games Manager</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <img src="../assets/icon.png" alt="Claimr Logo" class="brand-icon-img" />
+        </div>
+        <div class="brand-meta">
+          <h1 class="brand-title">Claimr</h1>
+          <span class="brand-subtitle">Epic Games &amp; GOG</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Background Service Toggle -->
+        <label class="service-pill" id="serviceToggleContainer" for="serviceCheckbox" title="Toggle background auto-claim">
+          <span class="service-label">Auto-Claim</span>
+          <span class="switch">
+            <input type="checkbox" id="serviceCheckbox">
+            <span class="slider"></span>
+          </span>
+        </label>
+
+        <button class="btn btn-secondary" id="historyBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          History
+        </button>
+
+        <button class="btn btn-icon" id="refreshBtn" title="Check for new offers">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6"></path>
+            <path d="M1 20v-6h6"></path>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      
+      <!-- Account Status Cards -->
+      <section class="accounts-bar">
+        <div class="account-card" id="epicAccountCard">
+          <div class="account-info">
+            <div class="store-badge store-epic">Epic</div>
+            <div class="account-text">
+              <div class="account-name">Epic Games Store</div>
+              <div class="account-status" id="epicStatusText">Checking authentication...</div>
+            </div>
+          </div>
+          <div class="account-actions">
+            <button class="btn btn-sm btn-secondary account-btn" id="epicAccountBtn">
+              <span id="epicAccountBtnText">Connect</span>
+              <span class="chevron" id="epicAccountChevron" style="display:none;">▾</span>
+            </button>
+            <div class="account-menu" id="epicAccountMenu">
+              <div class="account-menu-header">Saved Epic Accounts</div>
+              <div class="account-menu-list" id="epicAccountList"></div>
+              <div class="account-menu-divider"></div>
+              <button class="account-menu-item add-account-btn" id="epicAddAccountBtn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                <span>Add Another Account</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="account-card" id="gogAccountCard">
+          <div class="account-info">
+            <div class="store-badge store-gog">GOG</div>
+            <div class="account-text">
+              <div class="account-name">GOG.com</div>
+              <div class="account-status" id="gogStatusText">Checking authentication...</div>
+            </div>
+          </div>
+          <div class="account-actions">
+            <button class="btn btn-sm btn-secondary account-btn" id="gogAccountBtn">
+              <span id="gogAccountBtnText">Connect</span>
+              <span class="chevron" id="gogAccountChevron" style="display:none;">▾</span>
+            </button>
+            <div class="account-menu" id="gogAccountMenu">
+              <div class="account-menu-header">Saved GOG Accounts</div>
+              <div class="account-menu-list" id="gogAccountList"></div>
+              <div class="account-menu-divider"></div>
+              <button class="account-menu-item add-account-btn" id="gogAddAccountBtn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                <span>Add Another Account</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Drop Schedule Strip -->
+      <section class="schedule-strip">
+        <div class="schedule-info">
+          <div class="schedule-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <div class="schedule-copy">
+            <div class="schedule-title">Next Store Drop</div>
+            <div class="schedule-desc">Epic Games updates Thursdays at 11:00 AM EST</div>
+          </div>
+        </div>
+
+        <div class="countdown-pill" id="timerGrid">
+          <span class="countdown-label">Unlocks in</span>
+          <div class="countdown-digits">
+            <span class="timer-val" id="timerDays">00</span><span class="timer-unit">d</span>
+            <span class="timer-val" id="timerHours">00</span><span class="timer-unit">h</span>
+            <span class="timer-val" id="timerMinutes">00</span><span class="timer-unit">m</span>
+            <span class="timer-val" id="timerSeconds">00</span><span class="timer-unit">s</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Current Freebies Section -->
+      <section class="games-section">
+        <div class="section-header">
+          <h2 class="section-title">Available Now</h2>
+          <span class="section-meta" id="currentCountText">0 available</span>
+        </div>
+        <div class="games-grid" id="currentGamesGrid">
+          <div class="loading-state">Loading active promotions...</div>
+        </div>
+      </section>
+
+      <!-- Upcoming Freebies Section -->
+      <section class="games-section">
+        <div class="section-header">
+          <h2 class="section-title">Upcoming Next</h2>
+          <span class="section-meta" id="upcomingCountText">Next Week</span>
+        </div>
+        <div class="games-grid" id="upcomingGamesGrid">
+          <div class="loading-state">Loading upcoming games...</div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Bottom Action & Claim Bar -->
+    <footer class="bottom-bar">
+      <button class="btn btn-terminal" id="terminalToggleBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+        <span>Activity Log</span>
+        <div class="status-indicator" id="consoleIndicator"></div>
+      </button>
+
+      <button class="btn btn-primary-claim" id="claimAllBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        <span class="btn-text">Claim All Free Games</span>
+      </button>
+    </footer>
+
+    <!-- Activity Log Drawer -->
+    <div class="terminal-drawer" id="terminalDrawer">
+      <div class="terminal-header">
+        <div class="terminal-title">
+          <span>Claim Engine Activity</span>
+        </div>
+        <div class="terminal-actions">
+          <button class="btn-text-action" id="clearConsoleBtn">Clear</button>
+          <button class="btn-text-action" id="closeConsoleBtn">Close</button>
+        </div>
+      </div>
+      <div class="terminal-body" id="terminalOutput">
+        <div class="log-line text-muted">Ready to check and claim free titles.</div>
+      </div>
+    </div>
+
+    <!-- History Modal -->
+    <div class="modal-overlay" id="historyModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3 class="modal-title">Claim History</h3>
+          <button class="btn-close" id="closeHistoryModal">&times;</button>
+        </div>
+        <div class="modal-body" id="historyList">
+          <div class="loading-state">Loading history...</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

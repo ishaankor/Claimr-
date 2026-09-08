@@ -6,12 +6,9 @@ const require = createRequire(import.meta.url);
 
 const STEALTH_ARGS = [
   '--disable-blink-features=AutomationControlled',
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-infobars',
-  '--disable-dev-shm-usage',
   '--no-first-run',
   '--no-default-browser-check',
+  ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
 ];
 
 /**

@@ -18,8 +18,7 @@ export async function launchBrowser({ headless = false, profileDir, log } = {}) 
     locale: CONFIG.LOCALE,
     args: [
       '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
+      ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ],
   }, log);
 

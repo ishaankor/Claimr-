@@ -29,8 +29,7 @@ export async function launchGogBrowser({ headless = false, profileDir, log } = {
     locale: 'en-US',
     args: [
       '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
+      ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ],
   }, log);
 

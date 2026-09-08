@@ -4,6 +4,7 @@ import { CONFIG } from './config.js';
 import { loadHistory, recordClaim } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
+import { resolveBrowserOptions } from './browser.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -22,7 +23,9 @@ export const GOG_CONFIG = {
  */
 export async function launchGogBrowser({ headless = false, profileDir } = {}) {
   const targetDir = profileDir || getActiveProfileDir('gog');
+  const browserOpts = await resolveBrowserOptions();
   const context = await chromium.launchPersistentContext(targetDir, {
+    ...browserOpts,
     headless,
     viewport: { width: 1366, height: 850 },
     userAgent: CONFIG.USER_AGENT,

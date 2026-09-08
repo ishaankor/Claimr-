@@ -47,7 +47,7 @@
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"],
       "category": "Game",
-      "maintainer": "Claimr Team <support@claimr.app>",
+      "maintainer": "Ishaan K. <ishaan@ishaankoradia.com>",
       "desktopName": "claimr.desktop"
     },
     "files": [
@@ -71,7 +71,7 @@
     "automation",
     "electron"
   ],
-  "author": "Claimr Team <support@claimr.app>",
+  "author": "Ishaan K. <ishaan@ishaankoradia.com>",
   "license": "MIT",
   "dependencies": {
     "cheerio": "^1.0.0",

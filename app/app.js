@@ -750,18 +750,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   refreshBtn.addEventListener('click', async () => {
+    if (refreshBtn.classList.contains('spinning')) return;
+    refreshBtn.classList.add('spinning');
     refreshBtn.disabled = true;
     try {
-      await refreshAuthStatus({ fast: false });
+      await refreshAuthStatus({ fast: true });
       await loadGames({ forceFetch: true });
     } finally {
+      refreshBtn.classList.remove('spinning');
       refreshBtn.disabled = false;
     }
   });
 
   // Initial Load
   (async () => {
-    await refreshAuthStatus({ fast: false });
+    await refreshAuthStatus({ fast: true });
     await loadGames({ forceFetch: true });
     checkServiceStatus();
   })();

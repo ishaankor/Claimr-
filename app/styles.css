@@ -252,6 +252,15 @@ input:checked + .slider:before {
   transform: scale(0.96);
 }
 
+@keyframes spinIcon {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.btn-icon.spinning svg {
+  animation: spinIcon 0.8s linear infinite;
+}
+
 .btn-sm {
   font-size: 0.72rem;
   padding: 4px 10px;

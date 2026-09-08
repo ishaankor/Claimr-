@@ -140,21 +140,27 @@ function createTray() {
 
 ipcMain.handle('store:get-all-games', async () => {
   try {
-    const epicPromos = await getPromotions();
-
-    // Check GOG giveaway with Playwright to extract real title, cover art and ownership status
-    let gogGiveaway = { active: false };
-    try {
-      const gogContext = await launchGogBrowser({ headless: true });
-      const gogPage = gogContext.pages().length > 0 ? gogContext.pages()[0] : await gogContext.newPage();
-      await gogPage.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await new Promise(r => setTimeout(r, 2500));
-      gogGiveaway = await checkGogGiveaway(gogPage);
-      await gogContext.close();
-    } catch (e) {
-      console.warn('GOG check error:', e.message);
-      gogGiveaway = { active: false, error: e.message };
-    }
+    const [epicPromos, gogGiveaway] = await Promise.all([
+      getPromotions().catch(e => {
+        console.warn('Epic promotions fetch notice:', e.message);
+        return { currentFreeGames: [], upcomingFreeGames: [] };
+      }),
+      (async () => {
+        let giveaway = { active: false };
+        try {
+          const gogContext = await launchGogBrowser({ headless: true });
+          const gogPage = gogContext.pages().length > 0 ? gogContext.pages()[0] : await gogContext.newPage();
+          await gogPage.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded', timeout: 8000 });
+          await new Promise(r => setTimeout(r, 1000));
+          giveaway = await checkGogGiveaway(gogPage);
+          await gogContext.close();
+        } catch (e) {
+          console.warn('GOG check notice:', e.message);
+          giveaway = { active: false, error: e.message };
+        }
+        return giveaway;
+      })(),
+    ]);
 
     // Sync detected real library status into history
     const history = loadHistory();

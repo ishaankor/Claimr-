@@ -8,7 +8,9 @@ import { getActiveProfileDir, createNewProfileDir, registerAccount } from './acc
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const GOG_CONFIG = {
-  PROFILE_DIR: path.join(CONFIG.DATA_DIR, '.profile-gog'),
+  get PROFILE_DIR() {
+    return path.join(CONFIG.DATA_DIR, '.profile-gog');
+  },
   HOME_URL: 'https://www.gog.com/en',
   LOGIN_URL: 'https://login.gog.com/login',
   CLAIM_URL: 'https://www.gog.com/giveaway/claim',

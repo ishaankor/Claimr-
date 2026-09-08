@@ -1,16 +1,47 @@
+import os from 'os';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
-const DATA_DIR = process.env.CLAIMR_DATA_DIR || ROOT_DIR;
+
+export function getDataDir() {
+  if (process.env.CLAIMR_DATA_DIR) {
+    return process.env.CLAIMR_DATA_DIR;
+  }
+  // If running inside packaged Electron app (app.asar)
+  if (ROOT_DIR.includes('app.asar')) {
+    let userData;
+    if (process.platform === 'darwin') {
+      userData = path.join(os.homedir(), 'Library', 'Application Support', 'Claimr');
+    } else if (process.platform === 'win32') {
+      userData = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claimr');
+    } else {
+      userData = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'claimr');
+    }
+    if (!fs.existsSync(userData)) {
+      try {
+        fs.mkdirSync(userData, { recursive: true });
+      } catch {}
+    }
+    return userData;
+  }
+  return ROOT_DIR;
+}
 
 export const CONFIG = {
   ROOT_DIR,
-  DATA_DIR,
-  PROFILE_DIR: path.join(DATA_DIR, '.profile'),
-  HISTORY_FILE: path.join(DATA_DIR, 'history.json'),
+  get DATA_DIR() {
+    return getDataDir();
+  },
+  get PROFILE_DIR() {
+    return path.join(getDataDir(), '.profile');
+  },
+  get HISTORY_FILE() {
+    return path.join(getDataDir(), 'history.json');
+  },
   LOCALE: 'en-US',
   COUNTRY: 'US',
   EPIC_FREE_PROMOTIONS_URL: 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions',

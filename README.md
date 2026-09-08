@@ -26,6 +26,11 @@ Claimr is a standalone desktop application. No programming knowledge, terminal c
 | **Windows** | [**Download Claimr-Setup.exe**](https://github.com/ishaankoradia/claimr/releases/latest) | Run the installer and launch Claimr from the Start Menu. |
 | **Linux** | [**Download Claimr.AppImage**](https://github.com/ishaankoradia/claimr/releases/latest) | Make executable (`chmod +x`) and run. |
 
+> **macOS Note**: Because Claimr is a community open-source app distributed outside the Mac App Store, macOS Gatekeeper may show a warning on first launch. If prompted, right-click **Claimr.app** in Applications and choose **Open**, or run:
+> ```bash
+> xattr -cr /Applications/Claimr.app
+> ```
+
 ---
 
 ## ✨ Features

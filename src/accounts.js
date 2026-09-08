@@ -1,12 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { getDataDir } from './config.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, '..');
-const DATA_DIR = process.env.CLAIMR_DATA_DIR || ROOT_DIR;
-const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+const getAccountsFile = () => path.join(getDataDir(), 'accounts.json');
 
 /**
  * Default structure if accounts.json doesn't exist.
@@ -28,9 +24,10 @@ function getDefaultStructure() {
  * Loads accounts registry from disk.
  */
 export function loadAccounts() {
+  const file = getAccountsFile();
   try {
-    if (fs.existsSync(ACCOUNTS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf-8'));
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
       // Ensure required structure exists
       if (!data.epic) data.epic = { activeId: null, accounts: [] };
       if (!data.gog) data.gog = { activeId: null, accounts: [] };
@@ -50,7 +47,7 @@ export function loadAccounts() {
  */
 export function saveAccounts(accountsData) {
   try {
-    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accountsData, null, 2), 'utf-8');
+    fs.writeFileSync(getAccountsFile(), JSON.stringify(accountsData, null, 2), 'utf-8');
   } catch (err) {
     console.error('❌ Failed to save accounts.json:', err.message);
   }
@@ -75,11 +72,11 @@ export function getActiveAccount(store) {
 export function getActiveProfileDir(store) {
   const active = getActiveAccount(store);
   if (!active || !active.profileDir) {
-    return path.join(DATA_DIR, store === 'epic' ? '.profile' : '.profile-gog');
+    return path.join(getDataDir(), store === 'epic' ? '.profile' : '.profile-gog');
   }
   return path.isAbsolute(active.profileDir)
     ? active.profileDir
-    : path.join(DATA_DIR, active.profileDir);
+    : path.join(getDataDir(), active.profileDir);
 }
 
 /**
@@ -158,7 +155,7 @@ export function removeAccount(store, accountId) {
   if (targetAccount && targetAccount.profileDir && targetAccount.profileDir.includes('.profiles')) {
     const fullPath = path.isAbsolute(targetAccount.profileDir)
       ? targetAccount.profileDir
-      : path.join(DATA_DIR, targetAccount.profileDir);
+      : path.join(getDataDir(), targetAccount.profileDir);
     try {
       if (fs.existsSync(fullPath)) {
         fs.rmSync(fullPath, { recursive: true, force: true });
@@ -177,7 +174,7 @@ export function removeAccount(store, accountId) {
 export function createNewProfileDir(store) {
   const id = `acc_${Date.now()}`;
   const relPath = path.join('.profiles', store, id);
-  const fullPath = path.join(DATA_DIR, relPath);
+  const fullPath = path.join(getDataDir(), relPath);
   fs.mkdirSync(fullPath, { recursive: true });
   return { id, relPath, fullPath };
 }

@@ -350,10 +350,34 @@ ipcMain.handle('accounts:remove', async (_event, { store, accountId }) => {
 
 ipcMain.handle('store:login-epic', async () => {
   console.log('🔑 Opening Epic Games login window...');
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('claim:log', '🔑 Opening browser for Epic Games login...');
+  }
   const context = await launchBrowser({ headless: false });
   const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
   try {
-    return await ensureLoggedIn(page, { interactive: true });
+    const ok = await ensureLoggedIn(page, {
+      interactive: true,
+      logger: (msg) => {
+        console.log(msg);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('claim:log', msg);
+        }
+      },
+    });
+    if (ok) {
+      const username = (await getEpicUsername(page)) || 'Epic User';
+      const active = getActiveAccount('epic');
+      if (active) {
+        registerAccount('epic', { ...active, username });
+      } else {
+        registerAccount('epic', { id: 'default', username, profileDir: '.profile' });
+      }
+    }
+    return { success: !!ok };
+  } catch (err) {
+    console.error('Epic login error:', err);
+    return { success: false, error: err.message };
   } finally {
     await context.close();
   }
@@ -361,7 +385,24 @@ ipcMain.handle('store:login-epic', async () => {
 
 ipcMain.handle('store:login-gog', async () => {
   console.log('🔑 Opening GOG login window...');
-  return await loginGog();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('claim:log', '🔑 Opening browser for GOG login...');
+  }
+  try {
+    const res = await loginGog();
+    if (res && res.success) {
+      const active = getActiveAccount('gog');
+      if (active) {
+        registerAccount('gog', { ...active, username: res.username });
+      } else {
+        registerAccount('gog', { id: 'default', username: res.username, profileDir: '.profile-gog' });
+      }
+    }
+    return res;
+  } catch (err) {
+    console.error('GOG login error:', err);
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('store:claim-all', async () => {

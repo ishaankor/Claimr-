@@ -226,11 +226,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (epicAccountBtnText.textContent === 'Connect') {
       epicAccountBtn.disabled = true;
       epicAccountBtnText.textContent = 'Opening...';
+      openTerminal();
+      logToTerminal('🔑 Opening browser for Epic Games login...');
       try {
-        await window.claimrAPI.loginEpic();
+        const res = await window.claimrAPI.loginEpic();
+        if (res && res.error) {
+          logToTerminal(`⚠️ Epic login notice: ${res.error}`);
+        }
         await refreshAuthStatus();
+      } catch (err) {
+        logToTerminal(`❌ Epic login error: ${err.message}`);
       } finally {
         epicAccountBtn.disabled = false;
+        if (!currentAuth || !currentAuth.epic) {
+          epicAccountBtnText.textContent = 'Connect';
+        }
       }
     } else {
       const isVisible = epicAccountMenu.classList.contains('visible');
@@ -247,11 +257,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (gogAccountBtnText.textContent === 'Connect') {
       gogAccountBtn.disabled = true;
       gogAccountBtnText.textContent = 'Opening...';
+      openTerminal();
+      logToTerminal('🔑 Opening browser for GOG login...');
       try {
-        await window.claimrAPI.loginGog();
+        const res = await window.claimrAPI.loginGog();
+        if (res && res.error) {
+          logToTerminal(`⚠️ GOG login notice: ${res.error}`);
+        }
         await refreshAuthStatus();
+      } catch (err) {
+        logToTerminal(`❌ GOG login error: ${err.message}`);
       } finally {
         gogAccountBtn.disabled = false;
+        if (!currentAuth || !currentAuth.gog) {
+          gogAccountBtnText.textContent = 'Connect';
+        }
       }
     } else {
       const isVisible = gogAccountMenu.classList.contains('visible');

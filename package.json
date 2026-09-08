@@ -47,8 +47,7 @@
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"],
       "category": "Game",
-      "maintainer": "Ishaan K. <ishaan@ishaankoradia.com>",
-      "desktopName": "claimr.desktop"
+      "maintainer": "Ishaan K. <ishaan@ishaankoradia.com>"
     },
     "files": [
       "**/*",

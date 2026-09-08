@@ -46,7 +46,7 @@ export const CONFIG = {
   COUNTRY: 'US',
   EPIC_FREE_PROMOTIONS_URL: 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions',
   EPIC_STORE_URL: 'https://store.epicgames.com',
-  LOGIN_URL: 'https://www.epicgames.com/id/login?lang=en-US&noHostRedirect=true&redirectUrl=https://store.epicgames.com/en-US/free-games',
+  LOGIN_URL: 'https://www.epicgames.com/id/login?lang=en-US&redirectUrl=https%3A%2F%2Fstore.epicgames.com%2Fen-US%2Ffree-games',
   GOG_HOME_URL: 'https://www.gog.com/en',
   GOG_LOGIN_URL: 'https://login.gog.com/auth?client_id=46755278331571209&layout=default&brand=gog&response_type=code&redirect_uri=https%3A%2F%2Fwww.gog.com%2Fon_login_success%3FreturnTo%3D%2Fen',
   GOG_CLAIM_URL: 'https://www.gog.com/giveaway/claim',

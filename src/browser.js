@@ -125,22 +125,13 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
  * @returns {Promise<Object>} Launch options to pass into chromium.launchPersistentContext()
  */
 export async function resolveBrowserOptions(log = console.log) {
-  // 1. Check if Playwright Chromium already exists in user's cache
-  try {
-    const execPath = chromium.executablePath();
-    if (execPath && fs.existsSync(execPath)) {
-      return {};
-    }
-  } catch (e) {
-    // Playwright executable not found or thrown
-  }
-
-  // 2. Check system browsers via Playwright registry
+  // 1. Check system browsers via Playwright registry first (Google Chrome or Microsoft Edge)
+  // System browsers have authentic hardware GPU acceleration, avoid SwiftShader, and match real OS fingerprints.
   try {
     const { registry } = require('playwright-core/lib/coreBundle');
     const reg = registry.registry;
 
-    // Try system Google Chrome
+    // Try system Google Chrome first (best compatibility & real hardware GPU)
     try {
       const chromePath = reg.findExecutable('chrome')?.executablePathOrDie('javascript');
       if (chromePath && fs.existsSync(chromePath)) {
@@ -151,7 +142,7 @@ export async function resolveBrowserOptions(log = console.log) {
       // Chrome not installed
     }
 
-    // Try system Microsoft Edge (built-in on Windows 10 & 11)
+    // Try system Microsoft Edge (pre-installed on Windows 10 & 11)
     try {
       const edgePath = reg.findExecutable('msedge')?.executablePathOrDie('javascript');
       if (edgePath && fs.existsSync(edgePath)) {
@@ -161,8 +152,23 @@ export async function resolveBrowserOptions(log = console.log) {
     } catch (e) {
       // Edge not installed
     }
+  } catch (e) {
+    // Registry lookup failed
+  }
 
-    // 3. If neither system Chrome nor Edge is present, automatically download Chromium
+  // 2. Check if Playwright Chromium already exists in user's cache
+  try {
+    const execPath = chromium.executablePath();
+    if (execPath && fs.existsSync(execPath)) {
+      return {};
+    }
+  } catch (e) {
+    // Playwright executable not found or thrown
+  }
+
+  // 3. If neither system Chrome/Edge nor Playwright Chromium is present, download Chromium
+  try {
+    const { registry } = require('playwright-core/lib/coreBundle');
     log?.('[Browser] Initializing browser engine for first-time setup (one-time download)...');
     await registry.installBrowsersForNpmInstall(['chromium']);
     log?.('[Browser] Browser engine ready.');

@@ -15,7 +15,6 @@ export async function launchBrowser({ headless = false, profileDir, log } = {}) 
   const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },
-    userAgent: CONFIG.USER_AGENT,
     locale: CONFIG.LOCALE,
     args: [
       '--disable-blink-features=AutomationControlled',
@@ -105,9 +104,6 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
   while (Date.now() - start < maxWaitMs) {
     await sleep(2000);
 
-    // Automatically detect and assist with Cloudflare Turnstile verification
-    await handleCloudflareTurnstile(page, logger);
-
     loggedIn = await checkIsLoggedIn();
     if (loggedIn) {
       logger('🎉 Login detected! Profile session saved.');
@@ -131,8 +127,6 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
  */
 async function handleDialogs(page, logger = console.log) {
   try {
-    await handleCloudflareTurnstile(page, logger);
-
     const continueBtn = page.locator('button:has-text("Continue"), //button[contains(.,"Continue")]');
     if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
       logger('   Handling confirmation modal (Continue)...');

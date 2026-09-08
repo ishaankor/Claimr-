@@ -26,7 +26,6 @@ export async function launchGogBrowser({ headless = false, profileDir, log } = {
   const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },
-    userAgent: CONFIG.USER_AGENT,
     locale: 'en-US',
     args: [
       '--disable-blink-features=AutomationControlled',

@@ -3,7 +3,7 @@ import { CONFIG } from './config.js';
 import { isGameClaimed, recordClaim } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
-import { launchBrowserContext } from './browser.js';
+import { launchBrowserContext, handleCloudflareTurnstile } from './browser.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -103,7 +103,11 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
   const maxWaitMs = 180000;
 
   while (Date.now() - start < maxWaitMs) {
-    await sleep(2500);
+    await sleep(2000);
+
+    // Automatically detect and assist with Cloudflare Turnstile verification
+    await handleCloudflareTurnstile(page, logger);
+
     loggedIn = await checkIsLoggedIn();
     if (loggedIn) {
       logger('🎉 Login detected! Profile session saved.');
@@ -127,6 +131,8 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
  */
 async function handleDialogs(page, logger = console.log) {
   try {
+    await handleCloudflareTurnstile(page, logger);
+
     const continueBtn = page.locator('button:has-text("Continue"), //button[contains(.,"Continue")]');
     if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
       logger('   Handling confirmation modal (Continue)...');

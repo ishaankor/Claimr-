@@ -48,7 +48,7 @@ export const CONFIG = {
   EPIC_STORE_URL: 'https://store.epicgames.com',
   LOGIN_URL: 'https://www.epicgames.com/id/login?lang=en-US&noHostRedirect=true&redirectUrl=https://store.epicgames.com/en-US/free-games',
   GOG_HOME_URL: 'https://www.gog.com/en',
-  GOG_LOGIN_URL: 'https://login.gog.com/login',
+  GOG_LOGIN_URL: 'https://login.gog.com/auth?client_id=46755278331571209&layout=default&brand=gog&response_type=code&redirect_uri=https%3A%2F%2Fwww.gog.com%2Fon_login_success%3FreturnTo%3D%2Fen',
   GOG_CLAIM_URL: 'https://www.gog.com/giveaway/claim',
   DEFAULT_TIMEOUT: 30000,
   USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',

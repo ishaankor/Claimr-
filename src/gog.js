@@ -13,7 +13,7 @@ export const GOG_CONFIG = {
     return path.join(CONFIG.DATA_DIR, '.profile-gog');
   },
   HOME_URL: 'https://www.gog.com/en',
-  LOGIN_URL: 'https://login.gog.com/login',
+  LOGIN_URL: 'https://login.gog.com/auth?client_id=46755278331571209&layout=default&brand=gog&response_type=code&redirect_uri=https%3A%2F%2Fwww.gog.com%2Fon_login_success%3FreturnTo%3D%2Fen',
   CLAIM_URL: 'https://www.gog.com/giveaway/claim',
   TIMEOUT: 30000,
 };
@@ -76,10 +76,27 @@ export async function isGogLoggedIn(page) {
       return userData.username;
     }
 
-    const usernameLoc = page.locator('#menuUsername');
+    const usernameLoc = page.locator('#menuUsername, a.menu-link[href*="account"], .menu-item--username, [data-menu-username]');
     if (await usernameLoc.count() > 0 && await usernameLoc.first().isVisible()) {
       const username = (await usernameLoc.first().innerText()).trim();
       if (username) return username;
+    }
+  } catch {}
+
+  // 3. Fallback: check context cookies for gog_us/login tokens
+  try {
+    const cookies = await page.context().cookies('https://www.gog.com');
+    const hasAuth = cookies.some(c => c.name === 'gog_us' || c.name === 'gog_lc' || c.name === 'login-token');
+    if (hasAuth && !page.url().includes('www.gog.com')) {
+      await page.goto('https://www.gog.com/en', { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await sleep(1500);
+      const res = await page.request.get('https://www.gog.com/userData.json', { timeout: 6000 });
+      if (res.ok()) {
+        const data = await res.json();
+        if (data && data.isLoggedIn && data.username) {
+          return data.username;
+        }
+      }
     }
   } catch {}
 
@@ -107,6 +124,27 @@ export async function loginGog({ profileDir } = {}) {
 
     while (Date.now() - start < maxWaitMs) {
       await sleep(2000);
+
+      // Auto-navigate to store if on callback or success page
+      const currentUrl = page.url();
+      if (currentUrl.includes('on_login_success') || currentUrl.includes('/auth/success') || currentUrl.includes('/en/account')) {
+        console.log('🔄 GOG login detected! Finalizing session on store...');
+        await page.goto(GOG_CONFIG.HOME_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        await sleep(1500);
+      }
+
+      // If user finished login on login.gog.com, navigate to www.gog.com
+      const cookies = await context.cookies();
+      const hasAuthCookie = cookies.some(c => 
+        (c.name === 'gog_us' || c.name === 'gog_lc' || c.name === 'login-token' || c.name === 'gog-al') &&
+        c.domain.includes('gog.com')
+      );
+      if (hasAuthCookie && page.url().includes('login.gog.com')) {
+        console.log('🔄 Auth session detected on login subdomain. Navigating to www.gog.com...');
+        await page.goto(GOG_CONFIG.HOME_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        await sleep(1500);
+      }
+
       const user = await isGogLoggedIn(page);
       if (user) {
         console.log(`🎉 Successfully authenticated on GOG as ${user}! Profile session saved.`);

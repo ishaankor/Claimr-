@@ -1,8 +1,10 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
+import path from 'path';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
+const activeProfileLocks = new Map();
 
 const STEALTH_ARGS = [
   '--disable-blink-features=AutomationControlled',
@@ -184,20 +186,27 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
     ignoreDefaultArgs: ['--enable-automation'],
   };
 
+  const resolvedDir = targetDir ? path.resolve(targetDir) : null;
+  if (resolvedDir) {
+    while (activeProfileLocks.has(resolvedDir)) {
+      await activeProfileLocks.get(resolvedDir);
+    }
+  }
+
+  let release;
+  if (resolvedDir) {
+    const lockPromise = new Promise(r => { release = r; });
+    activeProfileLocks.set(resolvedDir, lockPromise);
+  }
+
   // Clean up any stale Chromium process locks in profile directory to prevent ProcessSingleton crashes
-  if (targetDir) {
-    try {
-      const resolvedDir = path.resolve(targetDir);
-      const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
-      for (const lock of lockFiles) {
-        const lockPath = path.join(resolvedDir, lock);
-        if (fs.existsSync(lockPath)) {
-          try {
-            fs.unlinkSync(lockPath);
-          } catch {}
-        }
-      }
-    } catch {}
+  if (resolvedDir) {
+    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+    for (const lock of lockFiles) {
+      try {
+        fs.unlinkSync(path.join(resolvedDir, lock));
+      } catch {}
+    }
   }
 
   let context;
@@ -225,12 +234,39 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
         delete fallbackOpts.channel;
         context = await chromium.launchPersistentContext(targetDir, fallbackOpts);
       } catch (installErr) {
+        if (release) {
+          activeProfileLocks.delete(resolvedDir);
+          release();
+        }
         log?.(`[Browser] Auto-install failed: ${installErr.message}`);
         throw installErr;
       }
     } else {
+      if (release) {
+        activeProfileLocks.delete(resolvedDir);
+        release();
+      }
       throw err;
     }
+  }
+
+  // Intercept context.close to safely release profile lock and clean up Singleton files
+  if (release) {
+    const originalClose = context.close.bind(context);
+    context.close = async (...args) => {
+      try {
+        return await originalClose(...args);
+      } finally {
+        if (resolvedDir) {
+          const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+          for (const lock of lockFiles) {
+            try { fs.unlinkSync(path.join(resolvedDir, lock)); } catch {}
+          }
+          activeProfileLocks.delete(resolvedDir);
+          release();
+        }
+      }
+    };
   }
 
   // Inject stealth and anti-bot evasions into all pages in this context

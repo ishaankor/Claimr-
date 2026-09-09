@@ -501,23 +501,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const unclaimedGames = currentGames.filter(g => !g.isOwned);
       const ownedGames = currentGames.filter(g => g.isOwned);
 
-      // Verify real store library for any games marked unclaimed
-      if (unclaimedGames.length > 0 && window.claimrAPI.verifyRealLibrary) {
-        unclaimedGames.forEach(async (g) => {
-          try {
-            const res = await window.claimrAPI.verifyRealLibrary({
-              store: g.store,
-              title: g.title,
-              url: g.url,
-              id: g.id,
-              accountId: g.store === 'EPIC' ? currentAuth?.epicActiveId : currentAuth?.gogActiveId,
-            });
-            if (res && res.isOwned) {
-              renderGames();
-            }
-          } catch {}
-        });
-      }
 
       // Section Header Meta Text
       if (currentGames.length === 0) {

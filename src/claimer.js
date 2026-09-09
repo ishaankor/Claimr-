@@ -164,11 +164,16 @@ async function completeCheckout(page, logger = console.log) {
     'button:has-text("Add to Library")',
     'button:has-text("Place Order")',
     'button:has-text("Place order")',
+    'button:has-text("PLACE ORDER")',
     'button.payment-btn--primary',
   ];
 
-  const maxAttempts = 30;
+  const maxAttempts = 35;
   for (let i = 0; i < maxAttempts; i++) {
+    // 1. Handle any dialogs ("Device not supported", mature content, EULA) that block checkout
+    await handleDialogs(page, logger);
+
+    // 2. Check main page for checkout button
     for (const sel of candidateSelectors) {
       try {
         const btn = page.locator(sel);
@@ -181,6 +186,7 @@ async function completeCheckout(page, logger = console.log) {
       } catch {}
     }
 
+    // 3. Check all iframes for checkout button
     for (const frame of page.frames()) {
       for (const sel of candidateSelectors) {
         try {
@@ -281,9 +287,12 @@ export async function claimGame(page, game, history, { force = false, logger = c
 
   logger(`👉 Clicking "Get" for ${game.title}...`);
   await cta.click();
-  await sleep(2500);
 
-  await handleDialogs(page, logger);
+  // Aggressively dismiss any modals ("Device not supported", mature content) that immediately appear
+  for (let i = 0; i < 6; i++) {
+    await sleep(500);
+    await handleDialogs(page, logger);
+  }
 
   const clicked = await completeCheckout(page, logger);
   if (!clicked) {

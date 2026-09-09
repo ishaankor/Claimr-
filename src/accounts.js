@@ -104,16 +104,34 @@ export function getActiveAccount(store) {
 }
 
 /**
+ * Resolves a profile directory path into an absolute path guaranteed to be
+ * located within the app data directory.
+ * Strips any accidental leading root slashes (e.g. '/.profiles' -> '<DATA_DIR>/.profiles').
+ * 
+ * @param {string} [profileDir] - Stored profile path or relative path
+ * @param {string} [store='epic'] - Target store identifier ('epic' | 'gog')
+ * @returns {string} Fully qualified absolute directory path
+ */
+export function getFullProfileDir(profileDir, store = 'epic') {
+  if (!profileDir) {
+    return path.join(getDataDir(), store === 'epic' ? '.profile' : '.profile-gog');
+  }
+  let cleanDir = profileDir;
+  if (typeof cleanDir === 'string' && (cleanDir.startsWith('/.profile') || cleanDir.startsWith('\\.profile'))) {
+    cleanDir = cleanDir.replace(/^[/\\]+/, '');
+  }
+  if (path.isAbsolute(cleanDir)) {
+    return cleanDir;
+  }
+  return path.resolve(getDataDir(), cleanDir);
+}
+
+/**
  * Gets absolute directory path for the active account of a store.
  */
 export function getActiveProfileDir(store) {
   const active = getActiveAccount(store);
-  if (!active || !active.profileDir) {
-    return path.join(getDataDir(), store === 'epic' ? '.profile' : '.profile-gog');
-  }
-  return path.isAbsolute(active.profileDir)
-    ? active.profileDir
-    : path.join(getDataDir(), active.profileDir);
+  return getFullProfileDir(active?.profileDir, store);
 }
 
 /**
@@ -203,10 +221,8 @@ export function removeAccount(store, accountId) {
   saveAccounts(data);
 
   // If profile was in a custom subfolder under .profiles, delete it
-  if (targetAccount && targetAccount.profileDir && targetAccount.profileDir.includes('.profiles')) {
-    const fullPath = path.isAbsolute(targetAccount.profileDir)
-      ? targetAccount.profileDir
-      : path.join(getDataDir(), targetAccount.profileDir);
+  if (targetAccount && targetAccount.profileDir && targetAccount.profileDir.includes('.profile')) {
+    const fullPath = getFullProfileDir(targetAccount.profileDir, store);
     try {
       if (fs.existsSync(fullPath)) {
         fs.rmSync(fullPath, { recursive: true, force: true });

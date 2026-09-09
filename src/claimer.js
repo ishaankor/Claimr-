@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { CONFIG } from './config.js';
 import { isGameClaimed, recordClaim, loadHistory } from './history.js';
 import { sendNotification } from './notify.js';
-import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
+import { getActiveProfileDir, getFullProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
 import { launchBrowserContext, handleCloudflareTurnstile } from './browser.js';
 import { getPromotions } from './api.js';
 
@@ -12,7 +12,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Initializes the Playwright browser context using a persistent profile directory.
  */
 export async function launchBrowser({ headless = false, profileDir, log } = {}) {
-  const targetDir = profileDir || getActiveProfileDir('epic');
+  const targetDir = profileDir ? getFullProfileDir(profileDir, 'epic') : getActiveProfileDir('epic');
   const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },

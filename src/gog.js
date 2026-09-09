@@ -3,7 +3,7 @@ import path from 'path';
 import { CONFIG } from './config.js';
 import { loadHistory, recordClaim } from './history.js';
 import { sendNotification } from './notify.js';
-import { getActiveProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
+import { getActiveProfileDir, getFullProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
 import { launchBrowserContext } from './browser.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -22,7 +22,7 @@ export const GOG_CONFIG = {
  * Launches persistent browser context for GOG.
  */
 export async function launchGogBrowser({ headless = false, profileDir, log } = {}) {
-  const targetDir = profileDir || getActiveProfileDir('gog');
+  const targetDir = profileDir ? getFullProfileDir(profileDir, 'gog') : getActiveProfileDir('gog');
   const context = await launchBrowserContext(targetDir, {
     headless,
     viewport: { width: 1366, height: 850 },
@@ -392,11 +392,11 @@ export async function isGameInGogLibrary(gameTitle, { profileDir } = {}) {
 /**
  * Claims current active GOG giveaway.
  */
-export async function claimGog({ headless = true, logger = console.log, accountId = null, username = null } = {}) {
+export async function claimGog({ headless = true, logger = console.log, accountId = null, username = null, profileDir = null } = {}) {
   logger(`\n========================================`);
   logger(`🎮 [GOG.COM] Checking for Giveaways...`);
 
-  const context = await launchGogBrowser({ headless });
+  const context = await launchGogBrowser({ headless, profileDir });
   const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
 
   try {

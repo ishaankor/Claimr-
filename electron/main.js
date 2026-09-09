@@ -8,7 +8,7 @@ import { getPromotions } from '../src/api.js';
 import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary, syncEpicLibraryForAccount } from '../src/claimer.js';
 import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
-import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount } from '../src/accounts.js';
+import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount, getFullProfileDir } from '../src/accounts.js';
 import { setCustomNotifier } from '../src/notify.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,10 +27,11 @@ app.name = 'Claimr';
 setCustomNotifier((title, message) => {
   if (Notification.isSupported()) {
     const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
+    const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
     new Notification({
       title,
       body: message,
-      icon: iconPath,
+      icon,
     }).show();
   }
 });
@@ -496,7 +497,8 @@ ipcMain.handle('store:claim-all', async () => {
     sendLog(`Found ${currentFreeGames.length} active giveaway(s) on Epic.`);
 
     if (currentFreeGames.length > 0) {
-      const epicContext = await launchBrowser({ headless: true, profileDir: activeEpic?.profileDir });
+      const profileDir = getFullProfileDir(activeEpic?.profileDir, 'epic');
+      const epicContext = await launchBrowser({ headless: true, profileDir });
       const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
       try {
@@ -528,6 +530,7 @@ ipcMain.handle('store:claim-all', async () => {
       logger: sendLog,
       accountId: activeGog?.id || 'default',
       username: activeGog?.username,
+      profileDir: getFullProfileDir(activeGog?.profileDir, 'gog'),
     });
 
     sendLog('\n✨ [COMPLETE] All store giveaways checked and processed!');
@@ -568,7 +571,8 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
       sendLog(`👤 Active Epic Profile: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
       sendLog(`🔗 Target: ${storeUrl || gameTitle}`);
 
-      const epicContext = await launchBrowser({ headless: true, profileDir: activeEpic?.profileDir });
+      const profileDir = getFullProfileDir(activeEpic?.profileDir, 'epic');
+      const epicContext = await launchBrowser({ headless: true, profileDir });
       const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
       try {
@@ -608,6 +612,7 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
         logger: sendLog,
         accountId: activeGog?.id || 'default',
         username: activeGog?.username,
+        profileDir: getFullProfileDir(activeGog?.profileDir, 'gog'),
       });
       sendLog(`✨ [COMPLETE] Automator finished for: ${gameTitle}`);
       return { success: true, result };

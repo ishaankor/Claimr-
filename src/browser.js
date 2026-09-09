@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import { getDataDir } from './config.js';
 
 const require = createRequire(import.meta.url);
 const activeProfileLocks = new Map();
@@ -152,6 +153,27 @@ export async function resolveBrowserOptions(log = console.log) {
 }
 
 /**
+ * Normalizes any profile directory to a valid absolute path under the Claimr data directory.
+ * Strips erroneous root prefixes (like '/.profiles') caused by process.cwd() being root on macOS.
+ * 
+ * @param {string} [targetDir] 
+ * @returns {string} Fully resolved absolute directory path
+ */
+export function normalizeProfileDir(targetDir) {
+  if (!targetDir) {
+    return path.join(getDataDir(), '.profile');
+  }
+  let cleanDir = targetDir;
+  if (typeof cleanDir === 'string' && (cleanDir.startsWith('/.profile') || cleanDir.startsWith('\\.profile'))) {
+    cleanDir = cleanDir.replace(/^[/\\]+/, '');
+  }
+  if (path.isAbsolute(cleanDir)) {
+    return cleanDir;
+  }
+  return path.resolve(getDataDir(), cleanDir);
+}
+
+/**
  * Launches a persistent browser context with automatic fallback and self-healing.
  * Injects anti-bot stealth hooks and disables automation flags so Cloudflare Turnstile
  * does not block login.
@@ -162,6 +184,15 @@ export async function resolveBrowserOptions(log = console.log) {
  * @returns {Promise<BrowserContext>}
  */
 export async function launchBrowserContext(targetDir, options = {}, log = console.log) {
+  const resolvedDir = normalizeProfileDir(targetDir);
+
+  // Ensure directory exists on disk before Chromium launch
+  try {
+    fs.mkdirSync(resolvedDir, { recursive: true });
+  } catch (err) {
+    log?.(`[Browser] Profile directory notice: ${err.message}`);
+  }
+
   const browserOpts = await resolveBrowserOptions(log);
 
   const defaultUserAgent = process.platform === 'darwin'
@@ -186,7 +217,6 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
     ignoreDefaultArgs: ['--enable-automation'],
   };
 
-  const resolvedDir = targetDir ? path.resolve(targetDir) : null;
   if (resolvedDir) {
     while (activeProfileLocks.has(resolvedDir)) {
       await activeProfileLocks.get(resolvedDir);
@@ -211,7 +241,7 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
 
   let context;
   try {
-    context = await chromium.launchPersistentContext(targetDir, launchConfig);
+    context = await chromium.launchPersistentContext(resolvedDir, launchConfig);
   } catch (err) {
     const isMissingExec = err.message && (
       err.message.includes("Executable doesn't exist") ||
@@ -232,7 +262,7 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
           ignoreDefaultArgs: ['--enable-automation'],
         };
         delete fallbackOpts.channel;
-        context = await chromium.launchPersistentContext(targetDir, fallbackOpts);
+        context = await chromium.launchPersistentContext(resolvedDir, fallbackOpts);
       } catch (installErr) {
         if (release) {
           activeProfileLocks.delete(resolvedDir);

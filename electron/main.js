@@ -9,6 +9,7 @@ import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary, syncEpicLibraryForAccount } from '../src/claimer.js';
 import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
 import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount } from '../src/accounts.js';
+import { setCustomNotifier } from '../src/notify.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +23,17 @@ process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 app.commandLine.appendSwitch('disable-logging');
 app.setName('Claimr');
 app.name = 'Claimr';
+
+setCustomNotifier((title, message) => {
+  if (Notification.isSupported()) {
+    const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
+    new Notification({
+      title,
+      body: message,
+      icon: iconPath,
+    }).show();
+  }
+});
 
 let mainWindow = null;
 let tray = null;

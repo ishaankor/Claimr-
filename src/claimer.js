@@ -127,16 +127,16 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
  */
 async function handleDialogs(page, logger = console.log) {
   try {
-    const continueBtn = page.locator('button:has-text("Continue"), //button[contains(.,"Continue")]');
+    const continueBtn = page.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
     if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
       logger('   Handling confirmation modal (Continue)...');
-      await continueBtn.first().click();
+      await continueBtn.first().click({ delay: 50 });
       await sleep(1500);
     }
 
-    const yesBtn = page.locator('button:has-text("Yes, buy now")');
+    const yesBtn = page.locator('button:has-text("Yes, buy now"), button:has-text("YES, BUY NOW")');
     if (await yesBtn.count() > 0 && await yesBtn.first().isVisible()) {
-      await yesBtn.first().click();
+      await yesBtn.first().click({ delay: 50 });
       await sleep(1000);
     }
 
@@ -144,9 +144,18 @@ async function handleDialogs(page, logger = console.log) {
     if (await eulaCheck.count() > 0 && await eulaCheck.isVisible()) {
       logger('   Accepting EULA...');
       await eulaCheck.check();
-      const acceptBtn = page.locator('button:has-text("Accept")');
+      const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("ACCEPT")');
       if (await acceptBtn.count() > 0) {
-        await acceptBtn.click();
+        await acceptBtn.click({ delay: 50 });
+        await sleep(1500);
+      }
+    }
+
+    for (const frame of page.frames()) {
+      const frameContinue = frame.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
+      if (await frameContinue.count() > 0 && await frameContinue.first().isVisible()) {
+        logger('   Handling confirmation modal in frame (Continue)...');
+        await frameContinue.first().click({ delay: 50 });
         await sleep(1500);
       }
     }

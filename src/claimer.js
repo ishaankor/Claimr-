@@ -227,17 +227,37 @@ export async function claimGame(page, game, history, { force = false, logger = c
     return { status: 'already_claimed_in_history' };
   }
 
+  // 1. Instant check: If game is already owned according to Epic order history API
+  try {
+    const isOwned = await isGameInEpicLibrary(game, { page });
+    if (isOwned) {
+      logger(`✅ "${game.title}" is already in your library!`);
+      recordClaim(history, game, 'in_library', accountId, username);
+      return { status: 'in_library' };
+    }
+  } catch (e) {}
+
   await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.DEFAULT_TIMEOUT });
   await sleep(3000);
 
+  await handleCloudflareTurnstile(page, logger);
   await handleDialogs(page, logger);
 
   const cta = page.locator('button[data-testid="purchase-cta-button"]');
   try {
     await cta.waitFor({ state: 'visible', timeout: 15000 });
   } catch {
-    logger('⚠️ Could not locate purchase button (data-testid="purchase-cta-button").');
-    return { status: 'error_button_not_found' };
+    const handled = await handleCloudflareTurnstile(page, logger);
+    if (handled) {
+      await sleep(2500);
+      try {
+        await cta.waitFor({ state: 'visible', timeout: 8000 });
+      } catch {}
+    }
+    if (await cta.count() === 0) {
+      logger('⚠️ Could not locate purchase button (data-testid="purchase-cta-button").');
+      return { status: 'error_button_not_found' };
+    }
   }
 
   const btnText = (await cta.innerText()).toLowerCase().trim();

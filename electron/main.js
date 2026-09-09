@@ -484,7 +484,7 @@ ipcMain.handle('store:claim-all', async () => {
     sendLog(`Found ${currentFreeGames.length} active giveaway(s) on Epic.`);
 
     if (currentFreeGames.length > 0) {
-      const epicContext = await launchBrowser({ headless: true });
+      const epicContext = await launchBrowser({ headless: true, profileDir: activeEpic?.profileDir });
       const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
       try {
@@ -519,6 +519,9 @@ ipcMain.handle('store:claim-all', async () => {
     });
 
     sendLog('\n✨ [COMPLETE] All store giveaways checked and processed!');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('library:updated');
+    }
     return { success: true };
   } catch (err) {
     sendLog(`❌ Error during claim: ${err.message}`);
@@ -553,7 +556,7 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
       sendLog(`👤 Active Epic Profile: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
       sendLog(`🔗 Target: ${storeUrl || gameTitle}`);
 
-      const epicContext = await launchBrowser({ headless: true });
+      const epicContext = await launchBrowser({ headless: true, profileDir: activeEpic?.profileDir });
       const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
       try {
@@ -572,6 +575,9 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
           username: activeEpic?.username,
         });
         sendLog(`✨ [COMPLETE] Automator finished for: ${gameTitle}`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('library:updated');
+        }
         return { success: true, result };
       } finally {
         await epicContext.close();

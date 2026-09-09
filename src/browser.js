@@ -30,7 +30,18 @@ export async function applyStealthScripts(context) {
       }
     } catch (e) {}
 
-    // 2. Ensure window.chrome runtime exists cleanly without injecting deprecated/fake methods
+    // 2. Remove HeadlessChrome from navigator.userAgent if present
+    try {
+      if (navigator.userAgent && navigator.userAgent.includes('HeadlessChrome')) {
+        const cleanUA = navigator.userAgent.replace('HeadlessChrome', 'Chrome');
+        Object.defineProperty(Object.getPrototypeOf(navigator), 'userAgent', {
+          get: () => cleanUA,
+          configurable: true,
+        });
+      }
+    } catch (e) {}
+
+    // 3. Ensure window.chrome runtime exists cleanly without injecting deprecated/fake methods
     try {
       if (!window.chrome) {
         window.chrome = {};
@@ -151,13 +162,23 @@ export async function resolveBrowserOptions(log = console.log) {
 export async function launchBrowserContext(targetDir, options = {}, log = console.log) {
   const browserOpts = await resolveBrowserOptions(log);
 
+  const defaultUserAgent = process.platform === 'darwin'
+    ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
+    : (process.platform === 'win32'
+      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
+      : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36');
+
+  const userAgent = options.userAgent || defaultUserAgent;
+
   const mergedArgs = Array.from(new Set([
+    `--user-agent=${userAgent}`,
     ...(options.args || []),
     ...STEALTH_ARGS,
   ]));
 
   const launchConfig = {
     ...browserOpts,
+    userAgent,
     ...options,
     args: mergedArgs,
     ignoreDefaultArgs: ['--enable-automation'],

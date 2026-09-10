@@ -1,8 +1,8 @@
 import { getPromotions } from './src/api.js';
-import { loadHistory } from './src/history.js';
+import { loadHistory, isGameClaimed } from './src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame } from './src/claimer.js';
 import { claimGog, loginGog } from './src/gog.js';
-import { getActiveAccount } from './src/accounts.js';
+import { getActiveAccount, loadAccounts, getFullProfileDir } from './src/accounts.js';
 
 const args = process.argv.slice(2);
 const isCheckOnly = args.includes('--check') || args.includes('-c');
@@ -12,6 +12,7 @@ const isHeadless = args.includes('--headless');
 const isForce = args.includes('--force') || args.includes('-f');
 const isEpicOnly = args.includes('--epic-only');
 const isGogOnly = args.includes('--gog-only');
+const isAllAccounts = args.includes('--all-accounts') || isHeadless;
 
 const intervalArgIndex = args.indexOf('--interval');
 const intervalHours = intervalArgIndex !== -1 ? parseFloat(args[intervalArgIndex + 1]) : null;
@@ -88,47 +89,66 @@ async function runClaimer() {
     return;
   }
 
-  // 3. Process Epic Games Claims
+  // 3. Process Epic Games Claims (Multi-Account)
   if (!isGogOnly && currentFreeGames.length > 0) {
-    console.log('\n🚀 Starting Epic Games claiming session...');
-    const context = await launchBrowser({ headless: isHeadless });
-    const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+    const accountsData = loadAccounts();
+    const epicAccounts = isAllAccounts && accountsData.epic?.accounts?.length > 0
+      ? accountsData.epic.accounts
+      : [getActiveAccount('epic')].filter(Boolean);
 
-    try {
-      const loggedIn = await ensureLoggedIn(page, { interactive: !isHeadless });
-      if (!loggedIn) {
-        console.error('\n❌ Authentication required for Epic. Run `npm run login:epic` to sign in.');
-      } else {
-        const history = loadHistory();
-        const activeEpic = getActiveAccount('epic');
-        console.log(`👤 Active Epic Account: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
-        for (const game of currentFreeGames) {
-          await claimGame(page, game, history, {
-            force: isForce,
-            accountId: activeEpic?.id || 'default',
-            username: activeEpic?.username,
-          });
-        }
+    for (const account of epicAccounts) {
+      const history = loadHistory();
+      const unclaimed = currentFreeGames.filter(g => isForce || !isGameClaimed(history, g, account.id));
+      if (unclaimed.length === 0) {
+        console.log(`\n✅ All current Epic promotions already claimed/owned for ${account.username || account.id}.`);
+        continue;
       }
-    } catch (err) {
-      console.error('❌ Epic claimer error:', err.message);
-    } finally {
-      await context.close();
+
+      console.log(`\n🚀 Starting Epic claiming session for: ${account.username || account.id}...`);
+      const profileDir = getFullProfileDir(account.profileDir, 'epic');
+      const context = await launchBrowser({ headless: isHeadless, profileDir });
+      const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+
+      try {
+        const loggedIn = await ensureLoggedIn(page, { interactive: !isHeadless });
+        if (!loggedIn) {
+          console.error(`\n❌ Authentication required for ${account.username || account.id}. Skipping.`);
+        } else {
+          for (const game of unclaimed) {
+            await claimGame(page, game, loadHistory(), {
+              force: isForce,
+              accountId: account.id,
+              username: account.username,
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`❌ Epic claimer error for ${account.username || account.id}:`, err.message);
+      } finally {
+        await context.close();
+      }
     }
   }
 
-  // 4. Process GOG Claims
+  // 4. Process GOG Claims (Multi-Account)
   if (!isEpicOnly) {
-    try {
-      const activeGog = getActiveAccount('gog');
-      console.log(`👤 Active GOG Account: ${activeGog?.username || 'Default'} (${activeGog?.id || 'default'})`);
-      await claimGog({
-        headless: isHeadless,
-        accountId: activeGog?.id || 'default',
-        username: activeGog?.username,
-      });
-    } catch (err) {
-      console.error('❌ GOG claimer error:', err.message);
+    const accountsData = loadAccounts();
+    const gogAccounts = isAllAccounts && accountsData.gog?.accounts?.length > 0
+      ? accountsData.gog.accounts
+      : [getActiveAccount('gog')].filter(Boolean);
+
+    for (const account of gogAccounts) {
+      try {
+        console.log(`\n👾 Starting GOG claiming check for: ${account.username || account.id}...`);
+        await claimGog({
+          headless: isHeadless,
+          accountId: account.id,
+          username: account.username,
+          profileDir: getFullProfileDir(account.profileDir, 'gog'),
+        });
+      } catch (err) {
+        console.error(`❌ GOG claimer error for ${account.username || account.id}:`, err.message);
+      }
     }
   }
 

@@ -62,6 +62,7 @@ function generatePlist() {
         <string>${nodePath}</string>
         <string>${scriptPath}</string>
         <string>--headless</string>
+        <string>--all-accounts</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -73,7 +74,11 @@ function generatePlist() {
     <key>WorkingDirectory</key>
     <string>${ROOT_DIR}</string>
 
-    <!-- Run every day at 11:15 AM (covers Thursday drops) and 8:15 PM -->
+    <!-- Run every 2 hours (7200 seconds) so missed drops or flash giveaways are automatically caught -->
+    <key>StartInterval</key>
+    <integer>7200</integer>
+
+    <!-- Also explicitly trigger at 11:15 AM (covers Thursday drops) and 8:15 PM -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, powerMonitor } from 'electron';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -476,74 +476,8 @@ ipcMain.handle('store:claim-all', async () => {
   if (isClaimingInProgress) {
     return { error: 'Claiming process is already running.' };
   }
-
-  isClaimingInProgress = true;
-  const sendLog = (msg) => {
-    console.log(`[Claim Engine] ${msg}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('claim:log', msg);
-    }
-  };
-
-  try {
-    sendLog('🚀 [START] Multi-store claiming session initialized.');
-
-    // 1. Epic Games
-    sendLog('\n--- 🎮 EPIC GAMES STORE ---');
-    const activeEpic = getActiveAccount('epic');
-    sendLog(`👤 Active Epic Profile: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
-    sendLog('📡 Fetching active promotions...');
-    const { currentFreeGames } = await getPromotions();
-    sendLog(`Found ${currentFreeGames.length} active giveaway(s) on Epic.`);
-
-    if (currentFreeGames.length > 0) {
-      const profileDir = getFullProfileDir(activeEpic?.profileDir, 'epic');
-      const epicContext = await launchBrowser({ headless: true, profileDir });
-      const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
-
-      try {
-        const loggedIn = await ensureLoggedIn(epicPage, { interactive: false, logger: sendLog });
-        if (!loggedIn) {
-          sendLog('❌ Epic authentication required. Click "Connect" to log in.');
-        } else {
-          const history = loadHistory();
-          for (const game of currentFreeGames) {
-            await claimGame(epicPage, game, history, {
-              force: false,
-              logger: sendLog,
-              accountId: activeEpic?.id || 'default',
-              username: activeEpic?.username,
-            });
-          }
-        }
-      } finally {
-        await epicContext.close();
-      }
-    }
-
-    // 2. GOG.com
-    sendLog('\n--- 👾 GOG.COM ---');
-    const activeGog = getActiveAccount('gog');
-    sendLog(`👤 Active GOG Profile: ${activeGog?.username || 'Default'} (${activeGog?.id || 'default'})`);
-    await claimGog({
-      headless: true,
-      logger: sendLog,
-      accountId: activeGog?.id || 'default',
-      username: activeGog?.username,
-      profileDir: getFullProfileDir(activeGog?.profileDir, 'gog'),
-    });
-
-    sendLog('\n✨ [COMPLETE] All store giveaways checked and processed!');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('library:updated');
-    }
-    return { success: true };
-  } catch (err) {
-    sendLog(`❌ Error during claim: ${err.message}`);
-    return { success: false, error: err.message };
-  } finally {
-    isClaimingInProgress = false;
-  }
+  await executeAutoClaimInBackground();
+  return { success: true };
 });
 
 ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, storeUrl }) => {
@@ -642,10 +576,12 @@ function loadSettings() {
   try {
     const file = getSettingsPath();
     if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (parsed.autoClaim === undefined) parsed.autoClaim = true;
+      return parsed;
     }
   } catch {}
-  return { autoClaim: false, lastCheckSlot: null, lastCheckDate: null };
+  return { autoClaim: true, lastCheckSlot: null, lastCheckDate: null };
 }
 
 function saveSettings(settings) {
@@ -671,65 +607,101 @@ async function executeAutoClaimInBackground() {
   };
 
   sendLog('\n========================================');
-  sendLog('⏰ [Auto-Claim] Scheduled background check started...');
-  sendLog(`🖥️ Platform: ${process.platform} • Active Stores: Epic Games & GOG`);
+  sendLog('⏰ [Auto-Claim] Zero-touch background claim started...');
+  sendLog(`🖥️ Platform: ${process.platform} • Multi-Account Auto Engine`);
 
   const claimedGames = [];
 
   try {
-    // 1. Epic Games Store
-    sendLog('\n--- 🎮 [EPIC GAMES STORE] ---');
-    const activeEpic = getActiveAccount('epic');
-    sendLog(`👤 Active Epic Profile: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
-    const { currentFreeGames } = await getPromotions();
-    sendLog(`Found ${currentFreeGames.length} active Epic promotion(s).`);
+    const accountsData = loadAccounts();
 
-    if (currentFreeGames.length > 0) {
-      const epicContext = await launchBrowser({ headless: true });
-      const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
-      try {
-        const loggedIn = await ensureLoggedIn(epicPage, { interactive: false, logger: sendLog });
-        if (loggedIn) {
-          const history = loadHistory();
-          for (const game of currentFreeGames) {
-            const res = await claimGame(epicPage, game, history, {
-              force: false,
-              logger: sendLog,
-              accountId: activeEpic?.id || 'default',
-              username: activeEpic?.username,
-            });
-            if (res && res.status === 'claimed') {
-              claimedGames.push(`${game.title} (Epic)`);
+    // 1. Epic Games Store (Multi-Account)
+    const epicAccounts = accountsData.epic?.accounts?.length > 0
+      ? accountsData.epic.accounts
+      : [getActiveAccount('epic')].filter(Boolean);
+
+    sendLog(`\n--- 🎮 [EPIC GAMES STORE] (${epicAccounts.length} account(s) configured) ---`);
+    const { currentFreeGames } = await getPromotions().catch(e => {
+      sendLog(`⚠️ Could not fetch Epic promotions: ${e.message}`);
+      return { currentFreeGames: [] };
+    });
+
+    if (currentFreeGames.length > 0 && epicAccounts.length > 0) {
+      for (const acc of epicAccounts) {
+        const freshHistory = loadHistory();
+        const unclaimed = currentFreeGames.filter(g => !isGameClaimed(freshHistory, g, acc.id));
+        if (unclaimed.length === 0) {
+          sendLog(`✅ All Epic promotions already claimed/owned for ${acc.username || acc.id}.`);
+          continue;
+        }
+
+        sendLog(`\n👉 Processing ${unclaimed.length} game(s) for Epic account: ${acc.username || acc.id}`);
+        const profileDir = getFullProfileDir(acc.profileDir, 'epic');
+        const epicContext = await launchBrowser({ headless: true, profileDir });
+        const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
+
+        try {
+          const loggedIn = await ensureLoggedIn(epicPage, { interactive: false, logger: sendLog });
+          if (!loggedIn) {
+            sendLog(`⚠️ Epic session expired or unauthenticated for ${acc.username || acc.id}. Skipping.`);
+          } else {
+            for (const game of unclaimed) {
+              const res = await claimGame(epicPage, game, freshHistory, {
+                force: false,
+                logger: sendLog,
+                accountId: acc.id,
+                username: acc.username,
+              });
+              if (res && res.status === 'claimed') {
+                claimedGames.push(`${game.title} (${acc.username || 'Epic'})`);
+              }
             }
           }
-        } else {
-          sendLog('⚠️ Epic login session expired. Please open Claimr to reconnect.');
+        } catch (err) {
+          sendLog(`❌ Error claiming for Epic account ${acc.username || acc.id}: ${err.message}`);
+        } finally {
+          await epicContext.close().catch(() => {});
         }
-      } finally {
-        await epicContext.close();
       }
     }
 
-    // 2. GOG.com
-    sendLog('\n--- 👾 [GOG.COM] ---');
-    const activeGog = getActiveAccount('gog');
-    sendLog(`👤 Active GOG Profile: ${activeGog?.username || 'Default'} (${activeGog?.id || 'default'})`);
-    const gogRes = await claimGog({
-      headless: true,
-      logger: sendLog,
-      accountId: activeGog?.id || 'default',
-      username: activeGog?.username,
-    });
-    if (gogRes && gogRes.status === 'claimed') {
-      claimedGames.push(`${gogRes.title} (GOG)`);
+    // 2. GOG.com (Multi-Account)
+    const gogAccounts = accountsData.gog?.accounts?.length > 0
+      ? accountsData.gog.accounts
+      : [getActiveAccount('gog')].filter(Boolean);
+
+    sendLog(`\n--- 👾 [GOG.COM] (${gogAccounts.length} account(s) configured) ---`);
+    const gogGiveaway = await getGogGiveawayFastOrBrowser().catch(() => null);
+
+    if (gogGiveaway?.active && gogGiveaway?.title && gogAccounts.length > 0) {
+      const gameObj = { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' };
+      for (const acc of gogAccounts) {
+        const freshHistory = loadHistory();
+        if (isGameClaimed(freshHistory, gameObj, acc.id)) {
+          sendLog(`✅ GOG giveaway "${gogGiveaway.title}" already claimed for ${acc.username || acc.id}.`);
+          continue;
+        }
+
+        sendLog(`\n👉 Claiming GOG giveaway "${gogGiveaway.title}" for account: ${acc.username || acc.id}`);
+        const gogRes = await claimGog({
+          headless: true,
+          logger: sendLog,
+          accountId: acc.id,
+          username: acc.username,
+          profileDir: getFullProfileDir(acc.profileDir, 'gog'),
+        });
+        if (gogRes && gogRes.status === 'claimed') {
+          claimedGames.push(`${gogGiveaway.title} (${acc.username || 'GOG'})`);
+        }
+      }
     }
 
-    sendLog('✨ [Auto-Claim] Scheduled run completed.');
+    sendLog('\n✨ [Auto-Claim] Background processing completed.');
 
     // Native Cross-Platform System Notification
     if (claimedGames.length > 0 && Notification.isSupported()) {
       new Notification({
-        title: 'Claimr - Free Games Claimed! 🎁',
+        title: 'Claimr - Free Games Auto-Claimed! 🎁',
         body: `Successfully claimed: ${claimedGames.join(', ')}`,
         icon: path.join(ROOT_DIR, 'assets', 'icon.png'),
       }).show();
@@ -745,39 +717,100 @@ async function executeAutoClaimInBackground() {
   }
 }
 
-function checkAndRunScheduledAutoClaim() {
+/**
+ * Smart, lightweight checker.
+ * Runs in ~300ms via HTTP API without opening Chromium.
+ * Launches headless browser only if genuine unclaimed freebies are found.
+ */
+async function checkForNewUnclaimedFreebies(verbose = false) {
   const settings = loadSettings();
   if (!settings.autoClaim) return;
   if (isClaimingInProgress) return;
 
-  const now = new Date();
-  const currentHour = now.getHours();
-  const currentMin = now.getMinutes();
-  const todayDateStr = now.toISOString().slice(0, 10);
+  const sendLog = (msg) => {
+    console.log(msg);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('claim:log', msg);
+    }
+  };
 
-  // Target slots:
-  // Slot 1: 11:15 AM (11:15 to 11:45)
-  // Slot 2: 8:15 PM  (20:15 to 20:45)
-  let slot = null;
-  if (currentHour === 11 && currentMin >= 15 && currentMin <= 45) {
-    slot = `${todayDateStr}_11AM`;
-  } else if (currentHour === 20 && currentMin >= 15 && currentMin <= 45) {
-    slot = `${todayDateStr}_8PM`;
+  if (verbose) {
+    sendLog('🔍 [Auto-Claim] Checking active giveaways on Epic Games & GOG...');
   }
 
-  if (slot && settings.lastCheckSlot !== slot) {
-    console.log(`⏰ [Auto-Claim Scheduler] Triggering scheduled check for slot: ${slot}`);
-    settings.lastCheckSlot = slot;
-    settings.lastCheckDate = now.toISOString();
-    saveSettings(settings);
-    executeAutoClaimInBackground();
+  try {
+    const history = loadHistory();
+    const accountsData = loadAccounts();
+    const epicAccounts = accountsData.epic?.accounts?.length > 0
+      ? accountsData.epic.accounts
+      : [getActiveAccount('epic')].filter(Boolean);
+    const gogAccounts = accountsData.gog?.accounts?.length > 0
+      ? accountsData.gog.accounts
+      : [getActiveAccount('gog')].filter(Boolean);
+
+    let hasUnclaimed = false;
+
+    // 1. Check Epic promotions
+    const { currentFreeGames } = await getPromotions().catch(() => ({ currentFreeGames: [] }));
+    if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0 && epicAccounts.length > 0) {
+      for (const game of currentFreeGames) {
+        for (const acc of epicAccounts) {
+          if (!isGameClaimed(history, game, acc.id)) {
+            sendLog(`🎁 [Auto-Claim] Detected unclaimed game: "${game.title}" on Epic for ${acc.username || acc.id}!`);
+            hasUnclaimed = true;
+            break;
+          }
+        }
+        if (hasUnclaimed) break;
+      }
+    }
+
+    // 2. Check GOG promotions
+    if (!hasUnclaimed && gogAccounts.length > 0) {
+      const gogGiveaway = await getGogGiveawayFastOrBrowser().catch(() => null);
+      if (gogGiveaway?.active && gogGiveaway?.title) {
+        const gameObj = { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' };
+        for (const acc of gogAccounts) {
+          if (!isGameClaimed(history, gameObj, acc.id)) {
+            sendLog(`🎁 [Auto-Claim] Detected unclaimed giveaway: "${gogGiveaway.title}" on GOG for ${acc.username || acc.id}!`);
+            hasUnclaimed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (hasUnclaimed) {
+      sendLog('🚀 [Auto-Claim] Launching autonomous background claimer...');
+      await executeAutoClaimInBackground();
+    } else {
+      if (verbose) {
+        sendLog('✨ [Auto-Claim] All promotions are already claimed across your accounts. Monitoring in the background!');
+      } else {
+        console.log('✨ [Auto-Claim] All promotions are up-to-date across all accounts.');
+      }
+    }
+  } catch (err) {
+    sendLog(`❌ [Auto-Claim] Background check error: ${err.message}`);
   }
 }
 
 function startScheduler() {
   if (schedulerInterval) clearInterval(schedulerInterval);
-  schedulerInterval = setInterval(checkAndRunScheduledAutoClaim, 30 * 1000);
-  setTimeout(checkAndRunScheduledAutoClaim, 5000);
+  // Smart polling: Lightweight background check every 45 minutes
+  schedulerInterval = setInterval(() => checkForNewUnclaimedFreebies(false), 45 * 60 * 1000);
+
+  // Listen for system resume from sleep / screen unlock (macOS & Windows)
+  if (powerMonitor) {
+    powerMonitor.on('resume', () => {
+      console.log('⚡ [Auto-Claim] System resumed from sleep. Checking for new games in background...');
+      setTimeout(() => checkForNewUnclaimedFreebies(false), 3000);
+    });
+    powerMonitor.on('unlock-screen', () => {
+      console.log('⚡ [Auto-Claim] Screen unlocked. Checking for new games in background...');
+      setTimeout(() => checkForNewUnclaimedFreebies(false), 3000);
+    });
+  }
 }
 
 ipcMain.handle('service:get-status', async () => {
@@ -802,13 +835,18 @@ ipcMain.handle('service:toggle', async (_event, shouldEnable) => {
     console.warn('Could not set login item settings:', e.message);
   }
 
-  // Clean up legacy LaunchAgent on macOS if present
+  // Synchronize with OS-level macOS LaunchAgent
   if (process.platform === 'darwin') {
     try {
-      execSync(`launchctl bootout gui/$(id -u)/com.user.epic-game-claimer 2>/dev/null || true`);
-      const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.user.epic-game-claimer.plist');
-      if (fs.existsSync(plistPath)) fs.unlinkSync(plistPath);
-    } catch {}
+      const scriptPath = path.join(ROOT_DIR, 'scripts', 'service.js');
+      if (settings.autoClaim) {
+        execSync(`node "${scriptPath}" install`, { stdio: 'ignore' });
+      } else {
+        execSync(`node "${scriptPath}" uninstall`, { stdio: 'ignore' });
+      }
+    } catch (e) {
+      console.warn('Could not sync LaunchAgent:', e.message);
+    }
   }
 
   return { active: settings.autoClaim };

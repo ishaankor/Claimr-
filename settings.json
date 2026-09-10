@@ -1,5 +1,5 @@
 {
-  "autoClaim": false,
+  "autoClaim": true,
   "lastCheckSlot": null,
   "lastCheckDate": null
 }

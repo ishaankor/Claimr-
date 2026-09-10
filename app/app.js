@@ -752,7 +752,7 @@ document.addEventListener('DOMContentLoaded', () => {
         logToTerminal(`❌ [Auto-Claim] Error: ${res.error}`);
       }
       serviceCheckbox.checked = !!(res && res.active);
-      logToTerminal(`⚙️ [Auto-Claim] Background service is now ${serviceCheckbox.checked ? 'ACTIVE (Daily at 11:15 AM & 8:15 PM)' : 'DISABLED'}.`);
+      logToTerminal(`⚙️ [Auto-Claim] Background service is now ${serviceCheckbox.checked ? 'ACTIVE (Hourly, On Wake & At Startup)' : 'DISABLED'}.`);
     } catch (err) {
       logToTerminal(`❌ [Auto-Claim] Failed to change service status: ${err.message}`);
     } finally {

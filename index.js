@@ -3,6 +3,7 @@ import { loadHistory, isGameClaimed } from './src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame } from './src/claimer.js';
 import { claimGog, loginGog } from './src/gog.js';
 import { getActiveAccount, loadAccounts, getFullProfileDir } from './src/accounts.js';
+import { sendNotification } from './src/notify.js';
 
 const args = process.argv.slice(2);
 const isCheckOnly = args.includes('--check') || args.includes('-c');
@@ -89,6 +90,8 @@ async function runClaimer() {
     return;
   }
 
+  const newlyClaimed = [];
+
   // 3. Process Epic Games Claims (Multi-Account)
   if (!isGogOnly && currentFreeGames.length > 0) {
     const accountsData = loadAccounts();
@@ -115,11 +118,14 @@ async function runClaimer() {
           console.error(`\n❌ Authentication required for ${account.username || account.id}. Skipping.`);
         } else {
           for (const game of unclaimed) {
-            await claimGame(page, game, loadHistory(), {
+            const res = await claimGame(page, game, loadHistory(), {
               force: isForce,
               accountId: account.id,
               username: account.username,
             });
+            if (res && res.status === 'claimed') {
+              newlyClaimed.push(`${game.title} (${account.username || account.id})`);
+            }
           }
         }
       } catch (err) {
@@ -140,12 +146,15 @@ async function runClaimer() {
     for (const account of gogAccounts) {
       try {
         console.log(`\n👾 Starting GOG claiming check for: ${account.username || account.id}...`);
-        await claimGog({
+        const gogRes = await claimGog({
           headless: isHeadless,
           accountId: account.id,
           username: account.username,
           profileDir: getFullProfileDir(account.profileDir, 'gog'),
         });
+        if (gogRes && gogRes.status === 'claimed') {
+          newlyClaimed.push(`${gogRes.title} (${account.username || 'GOG'})`);
+        }
       } catch (err) {
         console.error(`❌ GOG claimer error for ${account.username || account.id}:`, err.message);
       }
@@ -153,6 +162,22 @@ async function runClaimer() {
   }
 
   console.log('\n✨ All store checks completed!');
+
+  // 5. Native OS notification on completion in headless/scheduled mode
+  if (isHeadless || isAllAccounts) {
+    if (newlyClaimed.length > 0) {
+      sendNotification(
+        'Claimr - Free Games Claimed! 🎁',
+        `Successfully claimed: ${newlyClaimed.join(', ')}`
+      );
+    } else if (currentFreeGames.length > 0) {
+      const titles = currentFreeGames.map(g => g.title).join(' & ');
+      sendNotification(
+        'Claimr - Library Verified ✅',
+        `All active offers (${titles}) are verified in your library!`
+      );
+    }
+  }
 }
 
 async function main() {

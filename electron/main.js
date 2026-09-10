@@ -9,7 +9,7 @@ import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary, syncEpicLibraryForAccount } from '../src/claimer.js';
 import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
 import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount, getFullProfileDir } from '../src/accounts.js';
-import { setCustomNotifier } from '../src/notify.js';
+import { setCustomNotifier, sendNotification } from '../src/notify.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -699,12 +699,17 @@ async function executeAutoClaimInBackground() {
     sendLog('\n✨ [Auto-Claim] Background processing completed.');
 
     // Native Cross-Platform System Notification
-    if (claimedGames.length > 0 && Notification.isSupported()) {
-      new Notification({
-        title: 'Claimr - Free Games Auto-Claimed! 🎁',
-        body: `Successfully claimed: ${claimedGames.join(', ')}`,
-        icon: path.join(ROOT_DIR, 'assets', 'icon.png'),
-      }).show();
+    if (claimedGames.length > 0) {
+      sendNotification(
+        'Claimr - Free Games Auto-Claimed! 🎁',
+        `Successfully claimed: ${claimedGames.join(', ')}`
+      );
+    } else if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0) {
+      const titles = currentFreeGames.map(g => g.title).join(' & ');
+      sendNotification(
+        'Claimr - Library Verified ✅',
+        `All active offers (${titles}) are verified in your library!`
+      );
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {

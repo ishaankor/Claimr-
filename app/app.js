@@ -845,5 +845,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 4. Progressively fetch fresh promotions (Epic in ~120ms, GOG in ~400ms)
     await loadGames({ forceFetch: false });
     checkServiceStatus();
+
+    // 5. Request native system notification permission if not yet determined
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
   })();
 });

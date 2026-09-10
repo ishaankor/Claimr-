@@ -20,8 +20,9 @@
     "service:status": "node scripts/service.js status",
     "service:run": "node scripts/service.js run",
     "service:logs": "node scripts/service.js logs",
+    "test:notification": "node scripts/test-notification.js",
     "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
+    "dist:mac": "electron-builder --mac && xattr -cr dist/mac-arm64/Claimr.app && codesign --force --deep --sign - dist/mac-arm64/Claimr.app",
     "dist:win": "electron-builder --win",
     "dist:linux": "electron-builder --linux",
     "dist:all": "electron-builder -mwl"

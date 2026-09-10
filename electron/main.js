@@ -28,11 +28,18 @@ setCustomNotifier((title, message) => {
   if (Notification.isSupported()) {
     const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
     const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
-    new Notification({
+    const n = new Notification({
       title,
       body: message,
       icon,
-    }).show();
+    });
+    n.on('show', () => {
+      console.log('🔔 [Notification] System notification presented.');
+    });
+    n.on('failed', (_event, error) => {
+      console.warn('⚠️ [Notification] System notification failed:', error);
+    });
+    n.show();
   }
 });
 
@@ -121,6 +128,15 @@ function createTray() {
           mainWindow.show();
           mainWindow.webContents.send('claim:trigger-ui');
         }
+      },
+    },
+    {
+      label: 'Send Test Notification 🔔',
+      click: () => {
+        sendNotification(
+          'Claimr Test 🎮',
+          'Native macOS notifications are functioning!'
+        );
       },
     },
     { type: 'separator' },
@@ -855,6 +871,14 @@ ipcMain.handle('service:toggle', async (_event, shouldEnable) => {
   }
 
   return { active: settings.autoClaim };
+});
+
+ipcMain.handle('system:test-notification', async () => {
+  sendNotification(
+    'Claimr Test 🎮',
+    'Native macOS notifications are functioning!'
+  );
+  return { success: true };
 });
 
 // -------------------------------------------------------------

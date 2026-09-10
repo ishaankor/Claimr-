@@ -22,16 +22,11 @@ export function sendNotification(title, message) {
     }
   }
 
-  // 2. On macOS: route notification through Claimr's bundle ID ("com.claimr.app")
-  // so macOS attaches Claimr's official app icon instead of the generic Script Editor scroll!
+  // 2. Headless CLI / LaunchAgent fallback on macOS when Electron is not running
   if (process.platform === 'darwin') {
     const escapedMsg = safeMessage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const escapedTitle = safeTitle.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const script = `try
-      tell application id "com.claimr.app" to display notification "${escapedMsg}" with title "${escapedTitle}" sound name "default"
-    on error
-      display notification "${escapedMsg}" with title "${escapedTitle}" sound name "default"
-    end try`;
+    const script = `display notification "${escapedMsg}" with title "${escapedTitle}" sound name "default"`;
     execFile('osascript', ['-e', script], (err) => {
       if (err) console.warn('macOS notification warning:', err.message);
     });

@@ -827,6 +827,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+
+
   // Initial Load
   (async () => {
     // 1. Instant 0ms render from cache if available

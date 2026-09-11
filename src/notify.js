@@ -24,6 +24,7 @@ export function sendNotification(title, message) {
 
   // 2. Headless CLI / LaunchAgent fallback on macOS when Electron is not running
   if (process.platform === 'darwin') {
+    execFile('afplay', ['/System/Library/Sounds/Glass.aiff'], () => {});
     const escapedMsg = safeMessage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const escapedTitle = safeTitle.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const script = `display notification "${escapedMsg}" with title "${escapedTitle}" sound name "default"`;

@@ -3,7 +3,7 @@
   "productName": "Claimr",
   "description": "Automated free game claimer and manager for Epic Games and GOG",
   "type": "module",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "main": "electron/main.js",
   "scripts": {
     "app": "node scripts/start-app.js",
@@ -20,7 +20,6 @@
     "service:status": "node scripts/service.js status",
     "service:run": "node scripts/service.js run",
     "service:logs": "node scripts/service.js logs",
-    "test:notification": "node scripts/test-notification.js",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac && xattr -cr dist/mac-arm64/Claimr.app && codesign --force --deep --sign - dist/mac-arm64/Claimr.app",
     "dist:win": "electron-builder --win",

@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, powerMonitor } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, powerMonitor, screen } from 'electron';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
 import { getPromotions } from '../src/api.js';
 import { loadHistory, isGameClaimed, recordClaim } from '../src/history.js';
 import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpicAccount, isGameInEpicLibrary, syncEpicLibraryForAccount } from '../src/claimer.js';
@@ -24,22 +24,207 @@ app.commandLine.appendSwitch('disable-logging');
 app.setName('Claimr');
 app.name = 'Claimr';
 
-setCustomNotifier((title, message) => {
-  if (Notification.isSupported()) {
+let activeToastWindow = null;
+let toastTimeout = null;
+
+/**
+ * Cross-platform floating notification banner with Claimr logo.
+ * Bypasses macOS Gatekeeper / ad-hoc code-signing restrictions completely.
+ * Always renders with Claimr branding, dark glassmorphic styling, and auto-dismissal.
+ */
+function showFloatingNotification(title, message) {
+  try {
+    if (activeToastWindow && !activeToastWindow.isDestroyed()) {
+      clearTimeout(toastTimeout);
+      try { activeToastWindow.destroy(); } catch (_) {}
+      activeToastWindow = null;
+    }
+
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { workArea } = primaryDisplay;
+    const bannerWidth = 360;
+    const bannerHeight = 84;
+    const x = Math.round(workArea.x + workArea.width - bannerWidth - 16);
+    const y = Math.round(workArea.y + 16);
+
+    const toastWin = new BrowserWindow({
+      width: bannerWidth,
+      height: bannerHeight,
+      x,
+      y,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: false,
+      resizable: false,
+      show: false,
+      backgroundColor: '#00000000',
+      hasShadow: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+
+    activeToastWindow = toastWin;
+    toastWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    toastWin.setAlwaysOnTop(true, 'floating');
+
     const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
-    const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
-    const n = new Notification({
-      title,
-      body: message,
-      icon,
+    let iconSrc = '';
+    if (fs.existsSync(iconPath)) {
+      const b64 = fs.readFileSync(iconPath).toString('base64');
+      iconSrc = `data:image/png;base64,${b64}`;
+    }
+
+    const safeTitle = String(title || 'Claimr')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const safeMsg = String(message || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+  }
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    height: 100%;
+    background: rgba(18, 22, 34, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px;
+    padding: 10px 14px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(99, 102, 241, 0.2);
+    cursor: pointer;
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .toast:hover {
+    background: rgba(26, 32, 48, 0.98);
+    border-color: rgba(99, 102, 241, 0.4);
+  }
+  .icon-box {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .icon-box img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .content {
+    flex: 1;
+    min-width: 0;
+  }
+  .title {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .message {
+    color: #94a3b8;
+    font-size: 11.5px;
+    line-height: 1.35;
+    margin-top: 2px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+  <div class="toast" onclick="window.location.href='claimr://open'">
+    <div class="icon-box">
+      ${iconSrc ? `<img src="${iconSrc}" />` : '🎮'}
+    </div>
+    <div class="content">
+      <div class="title">${safeTitle}</div>
+      <div class="message">${safeMsg}</div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    toastWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+    toastWin.webContents.on('will-navigate', (event) => {
+      event.preventDefault();
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      try { toastWin.destroy(); } catch (_) {}
+      if (activeToastWindow === toastWin) activeToastWindow = null;
     });
-    n.on('show', () => {
-      console.log('🔔 [Notification] System notification presented.');
+
+    toastWin.once('ready-to-show', () => {
+      if (!toastWin.isDestroyed()) {
+        toastWin.showInactive();
+      }
     });
-    n.on('failed', (_event, error) => {
-      console.warn('⚠️ [Notification] System notification failed:', error);
-    });
-    n.show();
+
+    toastTimeout = setTimeout(() => {
+      if (toastWin && !toastWin.isDestroyed()) {
+        toastWin.destroy();
+        if (activeToastWindow === toastWin) activeToastWindow = null;
+      }
+    }, 6000);
+  } catch (err) {
+    console.warn('Could not display floating notification banner:', err.message);
+  }
+}
+
+setCustomNotifier((title, message) => {
+  // 1. Audio chime (100% reliable, zero permissions required)
+  if (process.platform === 'darwin') {
+    execFile('afplay', ['/System/Library/Sounds/Glass.aiff'], () => {});
+    if (app.dock) app.dock.bounce('informational');
+  }
+
+  // 2. Custom floating desktop banner with official Claimr icon (immune to Gatekeeper & code signing)
+  showFloatingNotification(title, message);
+
+  // 3. Best-effort native notification
+  if (Notification.isSupported()) {
+    try {
+      const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
+      const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
+      const n = new Notification({
+        title,
+        body: message,
+        icon,
+      });
+      n.show();
+    } catch (_) {}
   }
 });
 
@@ -128,15 +313,6 @@ function createTray() {
           mainWindow.show();
           mainWindow.webContents.send('claim:trigger-ui');
         }
-      },
-    },
-    {
-      label: 'Send Test Notification 🔔',
-      click: () => {
-        sendNotification(
-          'Claimr Test 🎮',
-          'Native macOS notifications are functioning!'
-        );
       },
     },
     { type: 'separator' },
@@ -871,14 +1047,6 @@ ipcMain.handle('service:toggle', async (_event, shouldEnable) => {
   }
 
   return { active: settings.autoClaim };
-});
-
-ipcMain.handle('system:test-notification', async () => {
-  sendNotification(
-    'Claimr Test 🎮',
-    'Native macOS notifications are functioning!'
-  );
-  return { success: true };
 });
 
 // -------------------------------------------------------------

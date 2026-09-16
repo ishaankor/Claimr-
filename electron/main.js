@@ -10,6 +10,7 @@ import { launchBrowser, ensureLoggedIn, claimGame, getEpicUsername, loginNewEpic
 import { claimGog, loginGog, launchGogBrowser, isGogLoggedIn, checkGogGiveaway, loginNewGogAccount, isGameInGogLibrary, getGogGiveawayFastOrBrowser } from '../src/gog.js';
 import { loadAccounts, getActiveAccount, setActiveAccount, removeAccount, registerAccount, getFullProfileDir } from '../src/accounts.js';
 import { setCustomNotifier, sendNotification } from '../src/notify.js';
+import { ensurePlaywrightBrowser } from '../src/browser.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1061,6 +1062,11 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   startScheduler();
+
+  // Background readiness check for browser engine on first launch
+  ensurePlaywrightBrowser((msg) => {
+    console.log(`[Browser Engine] ${msg}`);
+  }).catch(() => {});
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

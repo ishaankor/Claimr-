@@ -85,6 +85,8 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
   return false;
 }
 
+let browserInstallPromise = null;
+
 /**
  * Resolves the optimal browser launch options for the user's environment.
  * 
@@ -92,12 +94,21 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
  * 1. Pre-installed Playwright Chromium (if developer or previously downloaded)
  * 2. System Google Chrome (channel: 'chrome')
  * 3. System Microsoft Edge (channel: 'msedge' - pre-installed on Windows 10/11)
- * 4. Automatic one-time background download of Chromium
+ * 4. Automatic one-time background download of Chromium + Headless Shell
  * 
  * @param {Function} [log] - Optional logger function for UI status feedback
  * @returns {Promise<Object>} Launch options to pass into chromium.launchPersistentContext()
  */
 export async function resolveBrowserOptions(log = console.log) {
+  // If an engine installation is currently in flight, wait for it
+  if (browserInstallPromise) {
+    log?.('[Browser] Waiting for browser engine installation to complete...');
+    const inFlightResult = await browserInstallPromise.catch(() => null);
+    if (inFlightResult && (inFlightResult.channel || inFlightResult.executablePath)) {
+      return inFlightResult;
+    }
+  }
+
   // 1. Check system browsers via Playwright registry first (Google Chrome or Microsoft Edge)
   // System browsers have authentic hardware GPU acceleration, avoid SwiftShader, and match real OS fingerprints.
   try {
@@ -125,6 +136,23 @@ export async function resolveBrowserOptions(log = console.log) {
     } catch (e) {
       // Edge not installed
     }
+
+    // Try system Linux browsers (Google Chrome, Chromium, snap Chromium)
+    if (process.platform === 'linux') {
+      const linuxCandidates = [
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/snap/bin/chromium',
+      ];
+      for (const bin of linuxCandidates) {
+        if (fs.existsSync(bin)) {
+          log?.(`[Browser] Using system Linux browser: ${bin}`);
+          return { executablePath: bin };
+        }
+      }
+    }
   } catch (e) {
     // Registry lookup failed
   }
@@ -133,23 +161,88 @@ export async function resolveBrowserOptions(log = console.log) {
   try {
     const execPath = chromium.executablePath();
     if (execPath && fs.existsSync(execPath)) {
-      return {};
+      // Use chrome-for-testing channel so Playwright executes full chromium in both headed and headless modes
+      return { channel: 'chrome-for-testing' };
     }
   } catch (e) {
     // Playwright executable not found or thrown
   }
 
-  // 3. If neither system Chrome/Edge nor Playwright Chromium is present, download Chromium
-  try {
-    const { registry } = require('playwright-core/lib/coreBundle');
-    log?.('[Browser] Initializing browser engine for first-time setup (one-time download)...');
-    await registry.installBrowsersForNpmInstall(['chromium']);
-    log?.('[Browser] Browser engine ready.');
-    return {};
-  } catch (err) {
-    log?.(`[Browser] Engine detection note: ${err.message}. Attempting default launch...`);
-    return {};
+  // 3. If neither system browser nor Playwright Chromium is present, download Chromium
+  return await ensurePlaywrightBrowser(log);
+}
+
+/**
+ * Proactively verifies and installs the Playwright Chromium browser engine on startup.
+ * Automatically runs on first launch so users never encounter missing executable errors.
+ */
+export async function ensurePlaywrightBrowser(log = console.log) {
+  if (browserInstallPromise) {
+    return browserInstallPromise;
   }
+
+  browserInstallPromise = (async () => {
+    try {
+      const { registry } = require('playwright-core/lib/coreBundle');
+      const reg = registry.registry;
+
+      // 1. Check system Chrome
+      try {
+        const chromePath = reg.findExecutable('chrome')?.executablePathOrDie('javascript');
+        if (chromePath && fs.existsSync(chromePath)) {
+          log?.('[Browser] System Google Chrome detected.');
+          return { channel: 'chrome' };
+        }
+      } catch {}
+
+      // 2. Check system Edge
+      try {
+        const edgePath = reg.findExecutable('msedge')?.executablePathOrDie('javascript');
+        if (edgePath && fs.existsSync(edgePath)) {
+          log?.('[Browser] System Microsoft Edge detected.');
+          return { channel: 'msedge' };
+        }
+      } catch {}
+
+      // 3. Check Linux system binaries
+      if (process.platform === 'linux') {
+        const linuxCandidates = [
+          '/usr/bin/google-chrome-stable',
+          '/usr/bin/google-chrome',
+          '/usr/bin/chromium-browser',
+          '/usr/bin/chromium',
+          '/snap/bin/chromium',
+        ];
+        for (const bin of linuxCandidates) {
+          if (fs.existsSync(bin)) {
+            log?.(`[Browser] System Linux browser detected: ${bin}`);
+            return { executablePath: bin };
+          }
+        }
+      }
+
+      // 4. Check if Playwright Chromium already exists
+      try {
+        const execPath = chromium.executablePath();
+        if (execPath && fs.existsSync(execPath)) {
+          return { channel: 'chrome-for-testing' };
+        }
+      } catch {}
+
+      // 5. Download both chromium and chromium-headless-shell so any launch mode works
+      log?.('⏳ [Browser] First-time setup: downloading browser engine...');
+      await registry.installBrowsersForNpmInstall(['chromium', 'chromium-headless-shell']);
+      log?.('✅ [Browser] Browser engine ready for claiming.');
+      return { channel: 'chrome-for-testing' };
+    } catch (err) {
+      log?.(`⚠️ [Browser] Browser engine setup note: ${err.message}. Attempting default launch...`);
+      return {};
+    } finally {
+      browserInstallPromise = null;
+    }
+  })();
+
+  return browserInstallPromise;
 }
 
 /**
@@ -250,18 +343,18 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
     );
 
     if (isMissingExec) {
-      log?.('[Browser] Browser executable missing. Automatically installing Chromium engine...');
+      log?.('⏳ [Browser] Browser engine missing. Automatically installing Chromium...');
       try {
         const { registry } = require('playwright-core/lib/coreBundle');
-        await registry.installBrowsersForNpmInstall(['chromium']);
-        log?.('[Browser] Chromium engine successfully installed! Launching browser...');
+        await registry.installBrowsersForNpmInstall(['chromium', 'chromium-headless-shell']);
+        log?.('✅ [Browser] Chromium engine successfully installed! Launching browser...');
         
         const fallbackOpts = {
           ...options,
+          channel: 'chrome-for-testing',
           args: mergedArgs,
           ignoreDefaultArgs: ['--enable-automation'],
         };
-        delete fallbackOpts.channel;
         context = await chromium.launchPersistentContext(resolvedDir, fallbackOpts);
       } catch (installErr) {
         if (release) {

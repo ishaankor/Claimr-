@@ -106,6 +106,13 @@ export async function getPromotions() {
     }
   }
 
+  // Sort upcoming games chronologically so the closest upcoming drop is always first
+  upcomingFreeGames.sort((a, b) => {
+    const timeA = a.startDate ? new Date(a.startDate).getTime() : Infinity;
+    const timeB = b.startDate ? new Date(b.startDate).getTime() : Infinity;
+    return timeA - timeB;
+  });
+
   return {
     currentFreeGames,
     upcomingFreeGames,

@@ -608,12 +608,43 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // Render Upcoming Games Grid
-      const upcomingGames = data.epic?.upcomingFreeGames || [];
+      const rawUpcoming = data.epic?.upcomingFreeGames || [];
+      // Sort upcoming games chronologically so the closest upcoming drop is always first
+      const upcomingGames = rawUpcoming.slice().sort((a, b) => {
+        const timeA = a.startDate ? new Date(a.startDate).getTime() : Infinity;
+        const timeB = b.startDate ? new Date(b.startDate).getTime() : Infinity;
+        return timeA - timeB;
+      });
+
       if (upcomingGames.length === 0) {
         upcomingGamesGrid.innerHTML = '<div class="loading-state">No upcoming giveaways announced yet.</div>';
+        nextDropDate = null;
       } else {
-        if (upcomingGames[0]?.startDate) {
+        // Pick the closest drop date that is in the future
+        const nowMs = Date.now();
+        const futureDrops = upcomingGames
+          .map(g => g.startDate ? new Date(g.startDate) : null)
+          .filter(d => d && !isNaN(d.getTime()) && d.getTime() > nowMs)
+          .sort((a, b) => a.getTime() - b.getTime());
+
+        if (futureDrops.length > 0) {
+          nextDropDate = futureDrops[0];
+        } else if (upcomingGames[0]?.startDate) {
           nextDropDate = new Date(upcomingGames[0].startDate);
+        } else {
+          nextDropDate = null;
+        }
+
+        const scheduleDesc = document.querySelector('.schedule-desc');
+        if (scheduleDesc && nextDropDate) {
+          const formatted = nextDropDate.toLocaleDateString(undefined, {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+          scheduleDesc.textContent = `Next giveaway unlocks ${formatted}`;
         }
 
         upcomingGamesGrid.innerHTML = upcomingGames.map(g => `
@@ -645,13 +676,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function startCountdown() {
     if (countdownInterval) clearInterval(countdownInterval);
 
-    // Default to next Thursday at 11:00 AM EST if no explicit date
-    if (!nextDropDate) {
-      const now = new Date();
-      const nextThursday = new Date();
-      const dayOffset = (4 - now.getDay() + 7) % 7 || 7;
-      nextThursday.setDate(now.getDate() + dayOffset);
-      nextThursday.setHours(11, 0, 0, 0);
+    // Default to next Thursday at 11:00 AM EST (15:00 UTC) if no explicit future date
+    const now = new Date();
+    if (!nextDropDate || nextDropDate.getTime() <= now.getTime()) {
+      const nextThursday = new Date(now);
+      const dayOffset = (4 - now.getUTCDay() + 7) % 7;
+      nextThursday.setUTCDate(now.getUTCDate() + (dayOffset === 0 && now.getUTCHours() >= 15 ? 7 : dayOffset));
+      nextThursday.setUTCHours(15, 0, 0, 0);
       nextDropDate = nextThursday;
     }
 

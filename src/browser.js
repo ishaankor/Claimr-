@@ -44,13 +44,21 @@ export async function applyStealthScripts(context) {
  */
 export async function handleCloudflareTurnstile(page, logger = console.log) {
   try {
-    const frames = page.frames();
-    for (const frame of frames) {
-      const url = (frame.url() || '').toLowerCase();
-      if (url.includes('challenges.cloudflare.com') || url.includes('turnstile') || url.includes('cloudflare.com/cdn-cgi')) {
+    const isCloudflareTitle = async () => {
+      const title = (await page.title().catch(() => '')) || '';
+      return title.includes('Just a moment') || title.includes('One more step');
+    };
+
+    const scopes = [page, ...page.frames()];
+    for (const scope of scopes) {
+      const url = (typeof scope.url === 'function' ? scope.url() : page.url() || '').toLowerCase();
+      const isCfUrl = url.includes('challenges.cloudflare.com') || url.includes('turnstile') || url.includes('cloudflare.com/cdn-cgi');
+      const isCfPage = await isCloudflareTitle();
+
+      if (isCfUrl || isCfPage) {
         // 1. Check if Turnstile has already solved itself
         try {
-          const responseInput = frame.locator('[name="cf-turnstile-response"], input[type="hidden"]');
+          const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"], input[type="hidden"]');
           if (await responseInput.count() > 0) {
             const val = await responseInput.first().inputValue().catch(() => '');
             if (val && val.length > 10) {
@@ -59,10 +67,10 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
           }
         } catch {}
 
-        const checkbox = frame.locator('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage, div.checkbox');
+        const checkbox = scope.locator('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage, div.checkbox, div.cf_challenge');
         if (await checkbox.count() > 0) {
           const firstBox = checkbox.first();
-          if (await firstBox.isVisible()) {
+          if (await firstBox.isVisible().catch(() => false)) {
             logger?.('   🛡️ Cloudflare verification detected. Completing security check...');
             await new Promise((r) => setTimeout(r, 1200));
 
@@ -78,11 +86,14 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
               await firstBox.click().catch(() => {});
             }
 
-            // Wait for token to populate (up to 6 seconds)
-            for (let t = 0; t < 12; t++) {
+            // Wait for verification to clear or token to populate (up to 12 seconds)
+            for (let t = 0; t < 24; t++) {
               await new Promise((r) => setTimeout(r, 500));
+              if (!(await isCloudflareTitle())) {
+                return true;
+              }
               try {
-                const responseInput = frame.locator('[name="cf-turnstile-response"]');
+                const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"]');
                 if (await responseInput.count() > 0) {
                   const val = await responseInput.first().inputValue().catch(() => '');
                   if (val && val.length > 10) {
@@ -100,6 +111,23 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
     // Non-critical, ignore
   }
   return false;
+}
+
+/**
+ * Repositions an offscreen browser window back onto the primary screen
+ * so the user can interactively complete a captcha or challenge if needed.
+ */
+export async function bringWindowToForeground(page) {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    if (windowId) {
+      await cdp.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { left: 100, top: 100, width: 1280, height: 800 }
+      });
+    }
+  } catch {}
 }
 
 let browserInstallPromise = null;
@@ -305,14 +333,27 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
 
   const browserOpts = await resolveBrowserOptions(log);
 
+  // On desktop platforms (Windows and macOS, or Linux with display), if headless is requested,
+  // launch headed off-screen so Chromium maintains authentic hardware GPU acceleration (DirectX / Metal / Vulkan)
+  // and real plugin metrics. This completely prevents SwiftShader detection from triggering Cloudflare Turnstile blocks.
+  const hasDisplay = process.platform !== 'linux' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY;
+  const useOffscreenHeaded = options.headless === true && hasDisplay;
+
+  const effectiveHeadless = useOffscreenHeaded ? false : !!options.headless;
+  const offscreenArgs = useOffscreenHeaded
+    ? ['--window-position=-2400,-2400', '--window-size=1366,850']
+    : [];
+
   const mergedArgs = Array.from(new Set([
     ...(options.args || []),
     ...STEALTH_ARGS,
+    ...offscreenArgs,
   ]));
 
   const launchConfig = {
     ...browserOpts,
     ...options,
+    headless: effectiveHeadless,
     args: mergedArgs,
     ignoreDefaultArgs: ['--enable-automation'],
   };

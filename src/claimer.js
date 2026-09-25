@@ -3,7 +3,7 @@ import { CONFIG } from './config.js';
 import { isGameClaimed, recordClaim, loadHistory } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, getFullProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
-import { launchBrowserContext, handleCloudflareTurnstile } from './browser.js';
+import { launchBrowserContext, handleCloudflareTurnstile, bringWindowToForeground } from './browser.js';
 import { getPromotions } from './api.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -385,6 +385,7 @@ async function completeCheckout(page, logger = console.log) {
 
       if (captchaAppeared) {
         logger('   🛡️ Security verification (Captcha) detected. Waiting for verification to complete (up to 90s)...');
+        await bringWindowToForeground(page);
         const startCaptchaWait = Date.now();
         while (Date.now() - startCaptchaWait < 90000) {
           await sleep(2000);
@@ -473,26 +474,80 @@ export async function claimGame(page, game, history, { force = false, logger = c
   } catch (e) {}
 
   await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.DEFAULT_TIMEOUT });
-  await sleep(3000);
+  await sleep(2000);
 
-  await handleCloudflareTurnstile(page, logger);
+  // 2. Wait for any Cloudflare challenge ("Just a moment..." / "One more step") to resolve
+  for (let t = 0; t < 15; t++) {
+    const title = (await page.title().catch(() => '')) || '';
+    if (title.includes('Just a moment') || title.includes('One more step')) {
+      logger('   ⏳ Waiting for Cloudflare verification to clear...');
+      await handleCloudflareTurnstile(page, logger);
+      if (t >= 5) {
+        await bringWindowToForeground(page);
+      }
+      await sleep(1500);
+    } else {
+      break;
+    }
+  }
+
   await handleDialogs(page, logger);
 
-  const cta = page.locator('button[data-testid="purchase-cta-button"]');
-  try {
-    await cta.waitFor({ state: 'visible', timeout: 15000 });
-  } catch {
-    const handled = await handleCloudflareTurnstile(page, logger);
-    if (handled) {
-      await sleep(2500);
-      try {
-        await cta.waitFor({ state: 'visible', timeout: 8000 });
-      } catch {}
+  // 3. Locate the primary purchase / CTA button across candidate selectors and safe scopes
+  const ctaSelectors = [
+    'button[data-testid="purchase-cta-button"]',
+    'aside button:has-text("Get")',
+    'aside button:has-text("GET")',
+    'aside button:has-text("In Library")',
+    'aside button:has-text("IN LIBRARY")',
+    'aside button:has-text("Owned")',
+    'aside button:has-text("OWNED")',
+    'button:has-text("Get")',
+    'button:has-text("GET")',
+    'button:has-text("In Library")',
+    'button:has-text("IN LIBRARY")',
+    'button:has-text("Owned")',
+    'button:has-text("OWNED")',
+  ];
+
+  let cta = null;
+  const startCtaWait = Date.now();
+  while (Date.now() - startCtaWait < 20000) {
+    const title = (await page.title().catch(() => '')) || '';
+    if (title.includes('Just a moment') || title.includes('One more step')) {
+      await handleCloudflareTurnstile(page, logger);
+      await sleep(1500);
+      continue;
     }
-    if (await cta.count() === 0) {
+
+    await handleDialogs(page, logger);
+
+    const scopes = [page, ...page.frames().filter(f => !isSecurityOrCaptchaFrame(f))];
+    for (const sel of ctaSelectors) {
+      for (const scope of scopes) {
+        try {
+          const locator = scope.locator(sel);
+          if (await locator.count() > 0 && await locator.first().isVisible().catch(() => false)) {
+            cta = locator.first();
+            break;
+          }
+        } catch {}
+      }
+      if (cta) break;
+    }
+
+    if (cta) break;
+    await sleep(1000);
+  }
+
+  if (!cta) {
+    const finalTitle = (await page.title().catch(() => '')) || '';
+    if (finalTitle.includes('Just a moment') || finalTitle.includes('One more step')) {
+      logger('⚠️ Blocked by Cloudflare security check ("Just a moment...").');
+    } else {
       logger('⚠️ Could not locate purchase button (data-testid="purchase-cta-button").');
-      return { status: 'error_button_not_found' };
     }
+    return { status: 'error_button_not_found' };
   }
 
   const btnText = (await cta.innerText()).toLowerCase().trim();
@@ -546,9 +601,9 @@ export async function claimGame(page, game, history, { force = false, logger = c
     } catch {}
 
     try {
-      const refreshedCta = page.locator('button[data-testid="purchase-cta-button"]');
+      const refreshedCta = page.locator('button[data-testid="purchase-cta-button"], aside button, button:has-text("In Library"), button:has-text("IN LIBRARY"), button:has-text("Owned")');
       if (await refreshedCta.count() > 0) {
-        const text = (await refreshedCta.innerText()).toLowerCase();
+        const text = (await refreshedCta.first().innerText()).toLowerCase();
         if (text.includes('in library') || text.includes('owned')) {
           logger(`🎉 SUCCESS: "${game.title}" is now verified In Library!`);
           recordClaim(history, game, 'claimed', accountId, username);
@@ -564,9 +619,9 @@ export async function claimGame(page, game, history, { force = false, logger = c
     logger('🔄 Verifying library status on store page...');
     await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.DEFAULT_TIMEOUT });
     await sleep(3000);
-    const finalCta = page.locator('button[data-testid="purchase-cta-button"]');
+    const finalCta = page.locator('button[data-testid="purchase-cta-button"], aside button, button:has-text("In Library"), button:has-text("IN LIBRARY"), button:has-text("Owned")');
     if (await finalCta.count() > 0) {
-      const finalText = (await finalCta.innerText()).toLowerCase();
+      const finalText = (await finalCta.first().innerText()).toLowerCase();
       if (finalText.includes('in library') || finalText.includes('owned')) {
         logger(`🎉 SUCCESS: "${game.title}" verified In Library!`);
         recordClaim(history, game, 'claimed', accountId, username);

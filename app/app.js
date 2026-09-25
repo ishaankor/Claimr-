@@ -852,11 +852,24 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       await refreshAuthStatus({ fast: true });
       await loadGames({ forceFetch: true });
+      if (window.claimrAPI?.syncLibrary) {
+        await window.claimrAPI.syncLibrary();
+      }
+      await renderGames();
+    } catch (err) {
+      console.warn('Refresh error:', err);
     } finally {
       refreshBtn.classList.remove('spinning');
       refreshBtn.disabled = false;
     }
   });
+
+  // Listen for real-time library updates from background sync, claims, and account swaps
+  if (window.claimrAPI?.onLibraryUpdated) {
+    window.claimrAPI.onLibraryUpdated(async () => {
+      await renderGames();
+    });
+  }
 
 
 

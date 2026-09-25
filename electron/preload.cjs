@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('claimrAPI', {
     return () => ipcRenderer.removeListener('claim:log', subscription);
   },
   verifyRealLibrary: (params) => ipcRenderer.invoke('store:verify-real-library', params),
+  syncLibrary: () => ipcRenderer.invoke('store:sync-library'),
   onLibraryUpdated: (callback) => {
     const subscription = () => callback();
     ipcRenderer.on('library:updated', subscription);

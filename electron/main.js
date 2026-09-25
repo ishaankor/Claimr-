@@ -570,6 +570,48 @@ ipcMain.handle('store:verify-real-library', async (_event, { store, accountId, t
   return { isOwned: false };
 });
 
+ipcMain.handle('store:sync-library', async () => {
+  const history = loadHistory();
+  const results = { epic: [], gog: [] };
+
+  // 1. Sync active Epic account library
+  const activeEpic = getActiveAccount('epic');
+  if (activeEpic) {
+    try {
+      const { currentFreeGames } = await getPromotions().catch(() => ({ currentFreeGames: [] }));
+      if (Array.isArray(currentFreeGames) && currentFreeGames.length > 0) {
+        const newlyOwned = await syncEpicLibraryForAccount(currentFreeGames, activeEpic);
+        results.epic = newlyOwned;
+      }
+    } catch (e) {
+      console.warn('Sync Epic library error:', e.message);
+    }
+  }
+
+  // 2. Sync active GOG account library
+  const activeGog = getActiveAccount('gog');
+  if (activeGog) {
+    try {
+      const gogGiveaway = await getGogGiveawayFastOrBrowser();
+      if (gogGiveaway?.active && gogGiveaway?.title) {
+        const isOwned = gogGiveaway.isAlreadyClaimed || await isGameInGogLibrary(gogGiveaway.title, { profileDir: activeGog.profileDir });
+        if (isOwned) {
+          recordClaim(history, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
+          results.gog.push(gogGiveaway.title);
+        }
+      }
+    } catch (e) {
+      console.warn('Sync GOG library error:', e.message);
+    }
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('library:updated');
+  }
+
+  return results;
+});
+
 ipcMain.handle('accounts:add', async (_event, { store }) => {
   console.log(`➕ Initiating new ${store} account login...`);
   if (store === 'epic') {

@@ -50,6 +50,43 @@ export async function applyStealthScripts(context) {
         window.chrome = {};
       }
     } catch (e) {}
+
+    // 4. Cleanly mask navigator.platform to Win32 so Epic Games and store CDNs treat session as Windows desktop
+    try {
+      Object.defineProperty(Object.getPrototypeOf(navigator), 'platform', {
+        get: () => 'Win32',
+        configurable: true,
+      });
+    } catch (e) {}
+
+    // 5. Cleanly mask navigator.userAgentData Client Hints to Windows x86_64 to avoid ARM/Linux device incompatibility flags
+    try {
+      if (navigator.userAgentData) {
+        const uadProto = Object.getPrototypeOf(navigator.userAgentData);
+        if (uadProto) {
+          try {
+            Object.defineProperty(uadProto, 'platform', {
+              get: () => 'Windows',
+              configurable: true,
+            });
+          } catch {}
+
+          const origGetHighEntropyValues = uadProto.getHighEntropyValues;
+          if (typeof origGetHighEntropyValues === 'function') {
+            uadProto.getHighEntropyValues = async function (hints) {
+              const res = await origGetHighEntropyValues.call(this, hints).catch(() => ({}));
+              return {
+                ...res,
+                platform: 'Windows',
+                architecture: 'x86',
+                bitness: '64',
+                model: '',
+              };
+            };
+          }
+        }
+      }
+    } catch (e) {}
   });
 }
 
@@ -288,11 +325,9 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
 
   const browserOpts = await resolveBrowserOptions(log);
 
-  const defaultUserAgent = process.platform === 'darwin'
-    ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
-    : (process.platform === 'win32'
-      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
-      : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36');
+  // Always default to Windows 10/11 x64 desktop User-Agent to avoid "Device not supported" warnings
+  // on Linux, ARM64, and macOS when claiming Windows-exclusive PC games.
+  const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
   const userAgent = options.userAgent || defaultUserAgent;
 

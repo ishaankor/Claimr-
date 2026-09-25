@@ -126,44 +126,56 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
  * Handles any interstitial dialogs (mature content, device warnings, EULA).
  */
 async function handleDialogs(page, logger = console.log) {
-  try {
-    const continueBtn = page.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
-    if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
-      logger('   Handling confirmation modal (Continue)...');
-      await continueBtn.first().click({ delay: 50 });
-      await sleep(1500);
-    }
-
-    const yesBtn = page.locator('button:has-text("Yes, buy now"), button:has-text("YES, BUY NOW")');
-    if (await yesBtn.count() > 0 && await yesBtn.first().isVisible()) {
-      await yesBtn.first().click({ delay: 50 });
-      await sleep(1000);
-    }
-
-    const eulaCheck = page.locator('input#agree');
-    if (await eulaCheck.count() > 0 && await eulaCheck.isVisible()) {
-      logger('   Accepting EULA...');
-      await eulaCheck.check();
-      const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("ACCEPT")');
-      if (await acceptBtn.count() > 0) {
-        await acceptBtn.click({ delay: 50 });
-        await sleep(1500);
+  const checkScope = async (scope, isFrame = false) => {
+    try {
+      // 1. Incompatible platform / device warnings & mature content confirmation
+      const continueBtn = scope.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
+      if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
+        logger(`   Handling confirmation modal${isFrame ? ' in frame' : ''} (Continue)...`);
+        await continueBtn.first().click({ delay: 50 }).catch(() => {});
+        await sleep(1000);
       }
-    }
 
-    for (const frame of page.frames()) {
-      const frameContinue = frame.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
-      if (await frameContinue.count() > 0 && await frameContinue.first().isVisible()) {
-        logger('   Handling confirmation modal in frame (Continue)...');
-        await frameContinue.first().click({ delay: 50 });
-        await sleep(1500);
+      const yesBtn = scope.locator('button:has-text("Yes, buy now"), button:has-text("YES, BUY NOW"), button:has-text("Yes"), button:has-text("YES")');
+      if (await yesBtn.count() > 0 && await yesBtn.first().isVisible()) {
+        logger(`   Handling confirmation modal${isFrame ? ' in frame' : ''} (Yes, buy now)...`);
+        await yesBtn.first().click({ delay: 50 }).catch(() => {});
+        await sleep(1000);
       }
-    }
-  } catch {}
+
+      const acknowledgeBtn = scope.locator('button:has-text("I Understand"), button:has-text("Proceed"), button:has-text("Dismiss"), button:has-text("OK")');
+      if (await acknowledgeBtn.count() > 0 && await acknowledgeBtn.first().isVisible()) {
+        logger(`   Handling dialog acknowledgement${isFrame ? ' in frame' : ''}...`);
+        await acknowledgeBtn.first().click({ delay: 50 }).catch(() => {});
+        await sleep(1000);
+      }
+
+      // 2. EULA & agreement checkboxes
+      const eulaCheck = scope.locator('input#agree, input[type="checkbox"]:not(:checked)');
+      if (await eulaCheck.count() > 0 && await eulaCheck.first().isVisible()) {
+        logger(`   Accepting EULA / Terms checkbox${isFrame ? ' in frame' : ''}...`);
+        await eulaCheck.first().check({ force: true }).catch(() => {});
+        await sleep(500);
+
+        const acceptBtn = scope.locator('button:has-text("Accept"), button:has-text("ACCEPT"), button:has-text("I Agree"), button:has-text("I Accept")');
+        if (await acceptBtn.count() > 0 && await acceptBtn.first().isVisible()) {
+          await acceptBtn.first().click({ delay: 50 }).catch(() => {});
+          await sleep(1000);
+        }
+      }
+    } catch {}
+  };
+
+  await checkScope(page, false);
+  for (const frame of page.frames()) {
+    await checkScope(frame, true);
+  }
 }
 
 /**
  * Completes the checkout screen by finding and clicking "Add to library" or "Place Order".
+ * Robustly waits for the button to finish initializing (bypassing .payment-loading--loading blur states),
+ * handles agreement checkboxes/buttons, and retries if the order did not immediately submit.
  */
 async function completeCheckout(page, logger = console.log) {
   logger('⏳ Waiting for checkout screen to load...');
@@ -175,48 +187,133 @@ async function completeCheckout(page, logger = console.log) {
     'button:has-text("Place order")',
     'button:has-text("PLACE ORDER")',
     'button.payment-btn--primary',
+    'button.payment-order-confirm__btn',
   ];
 
   const maxAttempts = 35;
+  let clickAttempts = 0;
+  const maxClickAttempts = 4;
+
   for (let i = 0; i < maxAttempts; i++) {
     // 1. Handle any dialogs ("Device not supported", mature content, EULA) that block checkout
     await handleDialogs(page, logger);
 
-    // 2. Check main page for checkout button
-    for (const sel of candidateSelectors) {
+    // 2. Handle Cloudflare Turnstile if detected
+    await handleCloudflareTurnstile(page, logger);
+
+    // 3. Handle EU refund agreement / terms across all scopes before attempting order button
+    const scopes = [page, ...page.frames()];
+    for (const scope of scopes) {
       try {
-        const btn = page.locator(sel);
-        if (await btn.count() > 0 && await btn.first().isVisible()) {
-          const text = (await btn.first().innerText()).trim();
-          logger(`👉 Found button "${text}" on checkout overlay. Clicking...`);
-          await btn.first().click({ delay: 50 });
-          return true;
+        const euAgree = scope.locator('button:has-text("I Accept"), button:has-text("I Agree")');
+        if (await euAgree.count() > 0 && await euAgree.first().isVisible()) {
+          logger('   👉 Clicking checkout terms agreement (I Accept / I Agree)...');
+          await euAgree.first().click({ delay: 50 }).catch(() => {});
+          await sleep(500);
+        }
+
+        const requiredCheckbox = scope.locator('input[type="checkbox"]:not(:checked), input#agree:not(:checked)');
+        if (await requiredCheckbox.count() > 0 && await requiredCheckbox.first().isVisible()) {
+          logger('   👉 Checking required terms checkbox in checkout...');
+          await requiredCheckbox.first().check({ force: true }).catch(() => {});
+          await sleep(300);
         }
       } catch {}
     }
 
-    // 3. Check all iframes for checkout button
-    for (const frame of page.frames()) {
+    // 4. Check if confirmation already appeared (order finished or fast-completed)
+    try {
+      const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
+      if (await confirmed.count() > 0 && await confirmed.first().isVisible()) {
+        return true;
+      }
+    } catch {}
+
+    // 5. Look for checkout button across all scopes
+    let targetButton = null;
+    let targetText = '';
+
+    for (const scope of scopes) {
       for (const sel of candidateSelectors) {
         try {
-          const btn = frame.locator(sel);
+          const btn = scope.locator(sel);
           if (await btn.count() > 0 && await btn.first().isVisible()) {
-            const text = (await btn.first().innerText()).trim();
-            logger(`👉 Found button "${text}" in checkout frame. Clicking...`);
-            await btn.first().click({ delay: 50 });
-            return true;
+            const el = btn.first();
+            const text = (await el.innerText()).trim();
+            targetButton = el;
+            targetText = text || 'Place Order';
+            break;
           }
         } catch {}
       }
+      if (targetButton) break;
     }
 
-    try {
-      const euAgree = page.locator('button:has-text("I Accept"), button:has-text("I Agree")');
-      if (await euAgree.count() > 0 && await euAgree.first().isVisible()) {
-        await euAgree.first().click();
-        await sleep(500);
+    if (targetButton) {
+      // Check whether button is in a loading or disabled state
+      let isLoading = false;
+      try {
+        const hasLoader = (await targetButton.locator('.payment-loading--loading, .payment-loading__loader, .payment-loading__container--blur').count()) > 0;
+        const isDisabledAttr = (await targetButton.getAttribute('disabled')) !== null;
+        const isAriaDisabled = (await targetButton.getAttribute('aria-disabled')) === 'true';
+        const classNames = (await targetButton.getAttribute('class')) || '';
+        const hasDisabledClass = classNames.includes('payment-btn--disabled') || classNames.includes('disabled');
+
+        isLoading = hasLoader || isDisabledAttr || isAriaDisabled || hasDisabledClass;
+      } catch {}
+
+      if (isLoading) {
+        logger('   ⏳ Checkout button is initializing/loading, waiting...');
+        await sleep(1000);
+        continue;
       }
-    } catch {}
+
+      // Button is ready and not loading. Buffer briefly so event listeners are fully attached.
+      await sleep(600);
+
+      logger(`👉 Found enabled button "${targetText}" in checkout. Clicking (attempt ${clickAttempts + 1}/${maxClickAttempts})...`);
+      clickAttempts++;
+
+      try {
+        await targetButton.scrollIntoViewIfNeeded().catch(() => {});
+        await targetButton.click({ delay: 100 });
+      } catch (err) {
+        logger(`   ⚠️ Click notice: ${err.message}. Retrying via force click...`);
+        await targetButton.click({ force: true, delay: 100 }).catch(() => {});
+      }
+
+      // Check whether the order is transitioning
+      await sleep(2000);
+
+      // Check if confirmation appeared
+      try {
+        const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
+        if (await confirmed.count() > 0 && await confirmed.first().isVisible()) {
+          return true;
+        }
+      } catch {}
+
+      // Check if button transitioned to loading / submitting state
+      try {
+        const isNowLoading = (await targetButton.locator('.payment-loading--loading, .payment-loading__loader').count()) > 0
+          || ((await targetButton.getAttribute('class')) || '').includes('loading');
+        if (isNowLoading) {
+          logger('   ⏳ Order submitted, processing transaction...');
+          return true;
+        }
+      } catch {
+        // If button is gone / detached, checkout succeeded or closed
+        return true;
+      }
+
+      // If we have reached max click attempts, proceed to confirmation verification loop
+      if (clickAttempts >= maxClickAttempts) {
+        return true;
+      }
+
+      // Otherwise loop will continue and retry if checkout overlay is still open
+      continue;
+    }
 
     await sleep(1000);
   }
@@ -345,18 +442,31 @@ export async function claimGame(page, game, history, { force = false, logger = c
     await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.DEFAULT_TIMEOUT });
     await sleep(3000);
     const finalCta = page.locator('button[data-testid="purchase-cta-button"]');
-    const finalText = (await finalCta.innerText()).toLowerCase();
-    if (finalText.includes('in library') || finalText.includes('owned')) {
-      logger(`🎉 SUCCESS: "${game.title}" verified In Library!`);
+    if (await finalCta.count() > 0) {
+      const finalText = (await finalCta.innerText()).toLowerCase();
+      if (finalText.includes('in library') || finalText.includes('owned')) {
+        logger(`🎉 SUCCESS: "${game.title}" verified In Library!`);
+        recordClaim(history, game, 'claimed', accountId, username);
+        sendNotification('Epic Games Freebie Claimed!', `Successfully claimed "${game.title}"!`);
+        return { status: 'claimed' };
+      }
+    }
+  } catch {}
+
+  // Final check: Authenticated order history API check (fast JSON verification)
+  try {
+    const isOwnedApi = await isGameInEpicLibrary(game, { page });
+    if (isOwnedApi) {
+      logger(`🎉 SUCCESS: "${game.title}" verified In Library via Epic API!`);
       recordClaim(history, game, 'claimed', accountId, username);
       sendNotification('Epic Games Freebie Claimed!', `Successfully claimed "${game.title}"!`);
       return { status: 'claimed' };
     }
   } catch {}
 
-  logger('⚠️ Order button was clicked, but could not explicitly verify final confirmation.');
-  recordClaim(history, game, 'claimed', accountId, username);
-  return { status: 'claimed_unverified' };
+  logger('❌ Order was placed or attempted, but could not explicitly verify final confirmation in library.');
+  logger('   Skipping history record so this title can be safely retried.');
+  return { status: 'error_unverified' };
 }
 
 /**
@@ -540,7 +650,31 @@ export async function syncEpicLibraryForAccount(games, account, { page: existing
       }
       pageNum++;
     }
-    return checkOrdersAgainstGames(allOrders);
+
+    let found = checkOrdersAgainstGames(allOrders);
+
+    // If any active free games were not found in recent orders (e.g. claimed long ago or via code),
+    // check store page CTA directly in the active session
+    if (found.length < unclaimedGames.length) {
+      const remaining = unclaimedGames.filter(g => !found.some(f => (f.id && f.id === g.id) || (f.title && f.title === g.title)));
+      for (const game of remaining) {
+        if (game.storeUrl) {
+          try {
+            await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
+            const cta = page.locator('button[data-testid="purchase-cta-button"]');
+            await cta.waitFor({ state: 'visible', timeout: 3500 }).catch(() => {});
+            if (await cta.count() > 0) {
+              const text = (await cta.first().innerText()).trim().toUpperCase();
+              if (text.includes('IN LIBRARY') || text.includes('VIEW IN LIBRARY') || text.includes('OWNED')) {
+                found.push(game);
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    return found;
   };
 
   let newlyOwned = [];

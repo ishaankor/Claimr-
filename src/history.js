@@ -25,16 +25,25 @@ export function isGameClaimed(history, game, accountId = null) {
   if (!history?.claimed) return false;
   const candidateKeys = [game.id, game.slug, game.title].filter(Boolean);
 
+  const isValidClaim = (record) => {
+    if (!record) return false;
+    if (typeof record === 'boolean') return record;
+    if (!record.status) return true;
+    return record.status === 'claimed' || record.status === 'in_library';
+  };
+
   if (accountId) {
     // If this specific account has claimed the game under any candidate key
     for (const key of candidateKeys) {
-      if (history.claimed[`${accountId}:${key}`]) return true;
+      const rec = history.claimed[`${accountId}:${key}`];
+      if (isValidClaim(rec)) return true;
     }
 
     // For the original 'default' account, also accept legacy records without account prefix
     if (accountId === 'default') {
       for (const key of candidateKeys) {
-        if (history.claimed[key]) return true;
+        const rec = history.claimed[key];
+        if (isValidClaim(rec)) return true;
       }
     }
 
@@ -43,7 +52,8 @@ export function isGameClaimed(history, game, accountId = null) {
   }
 
   for (const key of candidateKeys) {
-    if (history.claimed[key]) return true;
+    const rec = history.claimed[key];
+    if (isValidClaim(rec)) return true;
   }
   return false;
 }

@@ -122,10 +122,95 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
   return false;
 }
 
+function isSecurityOrCaptchaFrame(frame) {
+  try {
+    const url = (frame.url() || '').toLowerCase();
+    const name = (frame.name() || '').toLowerCase();
+    if (
+      url.includes('challenges.cloudflare.com') ||
+      url.includes('turnstile') ||
+      url.includes('hcaptcha') ||
+      url.includes('recaptcha') ||
+      url.includes('arkoselabs') ||
+      url.includes('arkose') ||
+      url.includes('octocaptcha') ||
+      url.includes('funcaptcha') ||
+      url.includes('cloudflare.com/cdn-cgi') ||
+      name.includes('arkose') ||
+      name.includes('captcha') ||
+      name.includes('enforcement')
+    ) {
+      return true;
+    }
+
+    const parent = typeof frame.parentFrame === 'function' ? frame.parentFrame() : null;
+    if (parent && parent !== frame && isSecurityOrCaptchaFrame(parent)) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether an active security challenge or interactive captcha is visible.
+ */
+export async function isCaptchaActive(page) {
+  try {
+    for (const frame of page.frames()) {
+      if (isSecurityOrCaptchaFrame(frame)) {
+        try {
+          const body = frame.locator('body');
+          if (await body.count() > 0 && await body.first().isVisible().catch(() => false)) {
+            return true;
+          }
+        } catch {}
+      }
+    }
+
+    const captchaSelectors = [
+      'iframe[src*="octocaptcha"]',
+      'iframe[src*="arkose"]',
+      'iframe[src*="funcaptcha"]',
+      'iframe[src*="hcaptcha"]',
+      'iframe[src*="recaptcha"]',
+      'iframe[src*="challenges.cloudflare"]',
+      'iframe[src*="turnstile"]',
+      'iframe#enforcementFrame',
+      'div#challenge-stage',
+      'div#challenge-running',
+      'div[id*="arkose"]',
+      'div[id*="enforcement"]',
+      'div[data-testid*="captcha"]',
+    ];
+
+    for (const sel of captchaSelectors) {
+      try {
+        const el = page.locator(sel);
+        if (await el.count() > 0 && await el.first().isVisible().catch(() => false)) {
+          return true;
+        }
+      } catch {}
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Handles any interstitial dialogs (mature content, device warnings, EULA).
+ * Strict safeguards: NEVER interacts with captcha frames or when a security challenge is active.
  */
 async function handleDialogs(page, logger = console.log) {
+  // If a captcha or security challenge is active, never interact with dialogs
+  if (await isCaptchaActive(page)) {
+    return;
+  }
+
   const checkScope = async (scope, isFrame = false) => {
     try {
       // 1. Incompatible platform / device warnings & mature content confirmation
@@ -150,11 +235,11 @@ async function handleDialogs(page, logger = console.log) {
         await sleep(1000);
       }
 
-      // 2. EULA & agreement checkboxes
-      const eulaCheck = scope.locator('input#agree, input[type="checkbox"]:not(:checked)');
+      // 2. Specific EULA & terms checkboxes (never touch generic checkboxes or captcha frames!)
+      const eulaCheck = scope.locator('input#agree:not(:checked), input#eula:not(:checked), input[name="agree"]:not(:checked), input[data-testid*="eula"]:not(:checked)');
       if (await eulaCheck.count() > 0 && await eulaCheck.first().isVisible()) {
         logger(`   Accepting EULA / Terms checkbox${isFrame ? ' in frame' : ''}...`);
-        await eulaCheck.first().check({ force: true }).catch(() => {});
+        await eulaCheck.first().check().catch(() => {});
         await sleep(500);
 
         const acceptBtn = scope.locator('button:has-text("Accept"), button:has-text("ACCEPT"), button:has-text("I Agree"), button:has-text("I Accept")');
@@ -168,6 +253,7 @@ async function handleDialogs(page, logger = console.log) {
 
   await checkScope(page, false);
   for (const frame of page.frames()) {
+    if (isSecurityOrCaptchaFrame(frame)) continue;
     await checkScope(frame, true);
   }
 }
@@ -192,17 +278,22 @@ async function completeCheckout(page, logger = console.log) {
 
   const maxAttempts = 35;
   let clickAttempts = 0;
-  const maxClickAttempts = 4;
+  const maxClickAttempts = 2;
 
   for (let i = 0; i < maxAttempts; i++) {
+    // 0. If a captcha is active, do not click buttons or touch form fields
+    if (await isCaptchaActive(page)) {
+      logger('   🛡️ Security challenge / Captcha active. Waiting for verification to complete...');
+      await sleep(2500);
+      continue;
+    }
+
     // 1. Handle any dialogs ("Device not supported", mature content, EULA) that block checkout
     await handleDialogs(page, logger);
 
-    // 2. Handle Cloudflare Turnstile if detected
-    await handleCloudflareTurnstile(page, logger);
-
-    // 3. Handle EU refund agreement / terms across all scopes before attempting order button
-    const scopes = [page, ...page.frames()];
+    // 2. Handle EU refund agreement / terms across safe non-captcha scopes
+    const safeFrames = page.frames().filter(f => !isSecurityOrCaptchaFrame(f));
+    const scopes = [page, ...safeFrames];
     for (const scope of scopes) {
       try {
         const euAgree = scope.locator('button:has-text("I Accept"), button:has-text("I Agree")');
@@ -212,16 +303,16 @@ async function completeCheckout(page, logger = console.log) {
           await sleep(500);
         }
 
-        const requiredCheckbox = scope.locator('input[type="checkbox"]:not(:checked), input#agree:not(:checked)');
+        const requiredCheckbox = scope.locator('input#agree:not(:checked), input#eula:not(:checked), input[name="agree"]:not(:checked), input[data-testid*="eula"]:not(:checked)');
         if (await requiredCheckbox.count() > 0 && await requiredCheckbox.first().isVisible()) {
           logger('   👉 Checking required terms checkbox in checkout...');
-          await requiredCheckbox.first().check({ force: true }).catch(() => {});
+          await requiredCheckbox.first().check().catch(() => {});
           await sleep(300);
         }
       } catch {}
     }
 
-    // 4. Check if confirmation already appeared (order finished or fast-completed)
+    // 3. Check if confirmation already appeared (order finished or fast-completed)
     try {
       const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
       if (await confirmed.count() > 0 && await confirmed.first().isVisible()) {
@@ -229,7 +320,7 @@ async function completeCheckout(page, logger = console.log) {
       }
     } catch {}
 
-    // 5. Look for checkout button across all scopes
+    // 4. Look for checkout button across all scopes
     let targetButton = null;
     let targetText = '';
 
@@ -280,6 +371,38 @@ async function completeCheckout(page, logger = console.log) {
       } catch (err) {
         logger(`   ⚠️ Click notice: ${err.message}. Retrying via force click...`);
         await targetButton.click({ force: true, delay: 100 }).catch(() => {});
+      }
+
+      // Check whether a captcha appeared as a result of clicking checkout
+      let captchaAppeared = false;
+      for (let c = 0; c < 3; c++) {
+        await sleep(1000);
+        if (await isCaptchaActive(page)) {
+          captchaAppeared = true;
+          break;
+        }
+      }
+
+      if (captchaAppeared) {
+        logger('   🛡️ Security verification (Captcha) detected. Waiting for verification to complete (up to 90s)...');
+        const startCaptchaWait = Date.now();
+        while (Date.now() - startCaptchaWait < 90000) {
+          await sleep(2000);
+
+          // Check if confirmation appeared while completing captcha
+          try {
+            const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
+            if (await confirmed.count() > 0 && await confirmed.first().isVisible().catch(() => false)) {
+              return true;
+            }
+          } catch {}
+
+          if (!(await isCaptchaActive(page))) {
+            logger('   ✅ Security verification completed. Processing order...');
+            await sleep(3000);
+            break;
+          }
+        }
       }
 
       // Check whether the order is transitioning

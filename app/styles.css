@@ -140,6 +140,16 @@ body {
   border-color: var(--border-strong);
 }
 
+.service-pill:has(input:checked) {
+  border-color: rgba(74, 222, 128, 0.25);
+  background: rgba(74, 222, 128, 0.05);
+}
+
+.service-pill:has(input:checked):hover {
+  background: rgba(74, 222, 128, 0.09);
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
 .service-pill:active {
   transform: scale(0.98);
 }

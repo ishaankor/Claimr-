@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 import { createRequire } from 'module';
 import { getDataDir } from './config.js';
 
@@ -23,12 +24,47 @@ const STEALTH_ARGS = [
  */
 export async function applyStealthScripts(context) {
   await context.addInitScript(() => {
-    // Mask navigator.webdriver cleanly only if not already masked natively by Chrome flags
+    // 1. Preserve native navigator.webdriver getter if already [native code] and false
+    // Overriding it with an arrow function causes Arkose Labs (Epic login) to detect tampering
+    // and fail submission with "Incorrect response. Please refresh the page."
     try {
-      if (navigator.webdriver) {
-        Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
-          get: () => false,
-          configurable: true,
+      const proto = Object.getPrototypeOf(navigator);
+      const desc = Object.getOwnPropertyDescriptor(proto, 'webdriver');
+      if (navigator.webdriver === true) {
+        delete proto.webdriver;
+      }
+    } catch (e) {}
+
+    // 2. Ensure window.chrome exists only if completely missing
+    try {
+      if (!window.chrome) {
+        window.chrome = {
+          app: { isInstalled: false },
+          csi: () => {},
+          loadTimes: () => {},
+        };
+      }
+    } catch (e) {}
+
+    // 3. Mock authentic plugins in headless mode only if completely empty
+    try {
+      if (!navigator.plugins || navigator.plugins.length === 0) {
+        const dummyPlugins = [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+        ];
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => dummyPlugins,
+        });
+      }
+    } catch (e) {}
+
+    // 4. Ensure languages are populated only if missing
+    try {
+      if (!navigator.languages || navigator.languages.length === 0) {
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
         });
       }
     } catch (e) {}
@@ -49,67 +85,69 @@ export async function handleCloudflareTurnstile(page, logger = console.log) {
       return title.includes('Just a moment') || title.includes('One more step');
     };
 
-    const scopes = [page, ...page.frames()];
-    for (const scope of scopes) {
-      const url = (typeof scope.url === 'function' ? scope.url() : page.url() || '').toLowerCase();
-      const isCfUrl = url.includes('challenges.cloudflare.com') || url.includes('turnstile') || url.includes('cloudflare.com/cdn-cgi');
-      const isCfPage = await isCloudflareTitle();
+    if (!(await isCloudflareTitle())) {
+      return false;
+    }
 
-      if (isCfUrl || isCfPage) {
-        // 1. Check if Turnstile has already solved itself
-        try {
-          const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"], input[type="hidden"]');
-          if (await responseInput.count() > 0) {
-            const val = await responseInput.first().inputValue().catch(() => '');
-            if (val && val.length > 10) {
-              return true;
-            }
-          }
-        } catch {}
+    // 1. Check if token already populated
+    for (const scope of [page, ...page.frames()]) {
+      try {
+        const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"], input[type="hidden"]');
+        if (await responseInput.count() > 0) {
+          const val = await responseInput.first().inputValue().catch(() => '');
+          if (val && val.length > 10) return true;
+        }
+      } catch {}
+    }
 
-        const checkbox = scope.locator('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage, div.checkbox, div.cf_challenge');
-        if (await checkbox.count() > 0) {
-          const firstBox = checkbox.first();
-          if (await firstBox.isVisible().catch(() => false)) {
-            logger?.('   🛡️ Cloudflare verification detected. Completing security check...');
-            await new Promise((r) => setTimeout(r, 1200));
+    // 2. Check child frames (where Turnstile widget iframe lives) first!
+    const cfFrame = page.frames().find(f => {
+      const url = (f.url() || '').toLowerCase();
+      return url.includes('challenges.cloudflare.com') || url.includes('turnstile');
+    });
 
-            // Human-like pointer movement and click to avoid synthetic click detection
-            const box = await firstBox.boundingBox().catch(() => null);
-            if (box) {
-              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 }).catch(() => {});
-              await new Promise((r) => setTimeout(r, 200));
-              await page.mouse.down().catch(() => {});
-              await new Promise((r) => setTimeout(r, 100));
-              await page.mouse.up().catch(() => {});
-            } else {
-              await firstBox.click().catch(() => {});
-            }
-
-            // Wait for verification to clear or token to populate (up to 12 seconds)
-            for (let t = 0; t < 24; t++) {
-              await new Promise((r) => setTimeout(r, 500));
-              if (!(await isCloudflareTitle())) {
-                return true;
-              }
-              try {
-                const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"]');
-                if (await responseInput.count() > 0) {
-                  const val = await responseInput.first().inputValue().catch(() => '');
-                  if (val && val.length > 10) {
-                    return true;
-                  }
-                }
-              } catch {}
-            }
-            return true;
-          }
+    if (cfFrame) {
+      const checkbox = cfFrame.locator('input[type="checkbox"], .ctp-checkbox-label, span.mark, div.checkbox');
+      if (await checkbox.count() > 0 && await checkbox.first().isVisible().catch(() => false)) {
+        logger?.('   🛡️ Cloudflare verification detected in frame. Completing security check...');
+        await new Promise((r) => setTimeout(r, 600));
+        const box = await checkbox.first().boundingBox().catch(() => null);
+        if (box) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 }).catch(() => {});
+          await new Promise((r) => setTimeout(r, 100));
+          await page.mouse.down().catch(() => {});
+          await new Promise((r) => setTimeout(r, 100));
+          await page.mouse.up().catch(() => {});
+        } else {
+          await checkbox.first().click().catch(() => {});
+        }
+      }
+    } else {
+      // 3. Check for Turnstile iframe on page
+      const iframeLoc = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"], iframe[src*="turnstile"]');
+      if (await iframeLoc.count() > 0 && await iframeLoc.first().isVisible().catch(() => false)) {
+        logger?.('   🛡️ Cloudflare verification detected. Completing security check...');
+        const box = await iframeLoc.first().boundingBox().catch(() => null);
+        if (box) {
+          const clickX = box.x + Math.min(32, box.width / 4);
+          const clickY = box.y + box.height / 2;
+          await page.mouse.move(clickX, clickY, { steps: 5 }).catch(() => {});
+          await new Promise((r) => setTimeout(r, 100));
+          await page.mouse.down().catch(() => {});
+          await new Promise((r) => setTimeout(r, 100));
+          await page.mouse.up().catch(() => {});
         }
       }
     }
-  } catch (e) {
-    // Non-critical, ignore
-  }
+
+    // Wait up to 6s for title to clear
+    for (let t = 0; t < 12; t++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!(await isCloudflareTitle())) {
+        return true;
+      }
+    }
+  } catch (e) {}
   return false;
 }
 
@@ -124,10 +162,20 @@ export async function bringWindowToForeground(page) {
     if (windowId) {
       await cdp.send('Browser.setWindowBounds', {
         windowId,
-        bounds: { left: 100, top: 100, width: 1280, height: 800 }
+        bounds: { windowState: 'normal', left: 100, top: 100, width: 1280, height: 800 }
       });
     }
   } catch {}
+
+  try {
+    await page.bringToFront().catch(() => {});
+  } catch {}
+
+  if (process.platform === 'darwin') {
+    try {
+      execFile('osascript', ['-e', 'tell application "System Events" to set frontmost of (first process whose name contains "Google Chrome" or name contains "Chromium" or name contains "Electron") to true'], () => {});
+    } catch {}
+  }
 }
 
 let browserInstallPromise = null;
@@ -333,29 +381,25 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
 
   const browserOpts = await resolveBrowserOptions(log);
 
-  // On desktop platforms (Windows and macOS, or Linux with display), if headless is requested,
-  // launch headed off-screen so Chromium maintains authentic hardware GPU acceleration (DirectX / Metal / Vulkan)
-  // and real plugin metrics. This completely prevents SwiftShader detection from triggering Cloudflare Turnstile blocks.
-  const hasDisplay = process.platform !== 'linux' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY;
-  const useOffscreenHeaded = options.headless === true && hasDisplay;
-
-  const effectiveHeadless = useOffscreenHeaded ? false : !!options.headless;
-  const offscreenArgs = useOffscreenHeaded
-    ? ['--window-position=-2400,-2400', '--window-size=1366,850']
-    : [];
+  const isHeadless = !!options.headless;
 
   const mergedArgs = Array.from(new Set([
     ...(options.args || []),
     ...STEALTH_ARGS,
-    ...offscreenArgs,
+    ...(isHeadless ? ['--headless=new'] : []),
   ]));
 
   const launchConfig = {
+    viewport: { width: 1366, height: 768 },
     ...browserOpts,
     ...options,
-    headless: effectiveHeadless,
+    headless: isHeadless,
     args: mergedArgs,
-    ignoreDefaultArgs: ['--enable-automation'],
+    ignoreDefaultArgs: [
+      '--enable-automation',
+      '--enable-unsafe-swiftshader',
+      ...(process.platform !== 'linux' ? ['--no-sandbox'] : [])
+    ],
   };
 
   // Only override userAgent if explicitly requested by caller.
@@ -449,5 +493,6 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
 
   // Inject stealth and anti-bot evasions into all pages in this context
   await applyStealthScripts(context);
+  context._isHeadless = isHeadless;
   return context;
 }

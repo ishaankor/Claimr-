@@ -122,12 +122,35 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
   return false;
 }
 
-function isSecurityOrCaptchaFrame(frame) {
+/**
+ * Simulates authentic human cursor trajectory and click to avoid bot heuristics and trusted-event flags.
+ */
+async function humanClick(page, locator) {
+  try {
+    const box = await locator.boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      const targetX = box.x + box.width * (0.35 + Math.random() * 0.3);
+      const targetY = box.y + box.height * (0.35 + Math.random() * 0.3);
+      await page.mouse.move(targetX, targetY, { steps: 8 }).catch(() => {});
+      await sleep(150 + Math.random() * 120);
+      await page.mouse.down().catch(() => {});
+      await sleep(70 + Math.random() * 60);
+      await page.mouse.up().catch(() => {});
+      return;
+    }
+  } catch {}
+  await locator.click({ delay: 60 }).catch(() => {});
+}
+
+/**
+ * Identifies if an iframe belongs to a known captcha or security challenge provider.
+ */
+export function isSecurityOrCaptchaFrame(frame) {
   try {
     const url = (frame.url() || '').toLowerCase();
     const name = (frame.name() || '').toLowerCase();
+
     if (
-      url.includes('challenges.cloudflare.com') ||
       url.includes('turnstile') ||
       url.includes('hcaptcha') ||
       url.includes('recaptcha') ||
@@ -155,12 +178,23 @@ function isSecurityOrCaptchaFrame(frame) {
 }
 
 /**
- * Checks whether an active security challenge or interactive captcha is visible.
+ * Checks whether an active security challenge or interactive captcha is visible and awaiting user interaction.
+ * Carefully avoids false positives on background invisible tokens while detecting live challenge modals.
  */
 export async function isCaptchaActive(page) {
   try {
+    // 1. Check for active hCaptcha challenge frame with visible challenge UI
     for (const frame of page.frames()) {
-      if (isSecurityOrCaptchaFrame(frame)) {
+      const url = (frame.url() || '').toLowerCase();
+      if (url.includes('hcaptcha.html#frame=challenge')) {
+        try {
+          const body = frame.locator('body');
+          if (await body.count() > 0 && await body.first().isVisible().catch(() => false)) {
+            return true;
+          }
+        } catch {}
+      }
+      if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('octocaptcha')) {
         try {
           const body = frame.locator('body');
           if (await body.count() > 0 && await body.first().isVisible().catch(() => false)) {
@@ -170,29 +204,20 @@ export async function isCaptchaActive(page) {
       }
     }
 
-    const captchaSelectors = [
-      'iframe[src*="octocaptcha"]',
-      'iframe[src*="arkose"]',
-      'iframe[src*="funcaptcha"]',
-      'iframe[src*="hcaptcha"]',
-      'iframe[src*="recaptcha"]',
-      'iframe[src*="challenges.cloudflare"]',
-      'iframe[src*="turnstile"]',
-      'iframe#enforcementFrame',
-      'div#challenge-stage',
-      'div#challenge-running',
-      'div[id*="arkose"]',
-      'div[id*="enforcement"]',
-      'div[data-testid*="captcha"]',
-    ];
+    // 2. Check for visible challenge iframes/containers on page
+    const visibleCaptchaContainers = page.locator(
+      'iframe[src*="hcaptcha.html#frame=challenge"]:visible, ' +
+      'iframe[title*="hCaptcha challenge"]:visible, ' +
+      'div#challenge-stage:visible'
+    );
+    if (await visibleCaptchaContainers.count() > 0) {
+      return true;
+    }
 
-    for (const sel of captchaSelectors) {
-      try {
-        const el = page.locator(sel);
-        if (await el.count() > 0 && await el.first().isVisible().catch(() => false)) {
-          return true;
-        }
-      } catch {}
+    // 3. Check for Cloudflare interstitial title
+    const title = (await page.title().catch(() => '')) || '';
+    if (title.includes('Just a moment') || title.includes('One more step')) {
+      return true;
     }
 
     return false;
@@ -203,241 +228,201 @@ export async function isCaptchaActive(page) {
 
 /**
  * Handles any interstitial dialogs (mature content, device warnings, EULA).
- * Strict safeguards: NEVER interacts with captcha frames or when a security challenge is active.
  */
 async function handleDialogs(page, logger = console.log) {
-  // If a captcha or security challenge is active, never interact with dialogs
-  if (await isCaptchaActive(page)) {
-    return;
-  }
+  try {
+    const continueBtn = page.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
+    if (await continueBtn.count() > 0 && await continueBtn.first().isVisible().catch(() => false)) {
+      logger('   Handling confirmation modal (Continue)...');
+      await continueBtn.first().click({ delay: 50 }).catch(() => {});
+      await sleep(1500);
+    }
 
-  const checkScope = async (scope, isFrame = false) => {
-    try {
-      // 1. Incompatible platform / device warnings & mature content confirmation
-      const continueBtn = scope.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
-      if (await continueBtn.count() > 0 && await continueBtn.first().isVisible()) {
-        logger(`   Handling confirmation modal${isFrame ? ' in frame' : ''} (Continue)...`);
-        await continueBtn.first().click({ delay: 50 }).catch(() => {});
-        await sleep(1000);
+    const yesBtn = page.locator('button:has-text("Yes, buy now"), button:has-text("YES, BUY NOW"), button:has-text("Yes"), button:has-text("YES")');
+    if (await yesBtn.count() > 0 && await yesBtn.first().isVisible().catch(() => false)) {
+      await yesBtn.first().click({ delay: 50 }).catch(() => {});
+      await sleep(1000);
+    }
+
+    const acknowledgeBtn = page.locator('button:has-text("I Understand"), button:has-text("Proceed"), button:has-text("Dismiss"), button:has-text("OK")');
+    if (await acknowledgeBtn.count() > 0 && await acknowledgeBtn.first().isVisible().catch(() => false)) {
+      await acknowledgeBtn.first().click({ delay: 50 }).catch(() => {});
+      await sleep(1000);
+    }
+
+    const eulaCheck = page.locator('input#agree, input#eula, input[name="agree"]');
+    if (await eulaCheck.count() > 0 && await eulaCheck.first().isVisible().catch(() => false)) {
+      logger('   Accepting EULA...');
+      await eulaCheck.first().check().catch(() => {});
+      const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("ACCEPT"), button:has-text("I Agree"), button:has-text("I Accept")');
+      if (await acceptBtn.count() > 0 && await acceptBtn.first().isVisible().catch(() => false)) {
+        await acceptBtn.first().click({ delay: 50 }).catch(() => {});
+        await sleep(1500);
       }
+    }
 
-      const yesBtn = scope.locator('button:has-text("Yes, buy now"), button:has-text("YES, BUY NOW"), button:has-text("Yes"), button:has-text("YES")');
-      if (await yesBtn.count() > 0 && await yesBtn.first().isVisible()) {
-        logger(`   Handling confirmation modal${isFrame ? ' in frame' : ''} (Yes, buy now)...`);
-        await yesBtn.first().click({ delay: 50 }).catch(() => {});
-        await sleep(1000);
+    for (const frame of page.frames()) {
+      if (isSecurityOrCaptchaFrame(frame)) continue;
+      const frameContinue = frame.locator('button:has-text("Continue"), button:has-text("CONTINUE")');
+      if (await frameContinue.count() > 0 && await frameContinue.first().isVisible().catch(() => false)) {
+        logger('   Handling confirmation modal in frame (Continue)...');
+        await frameContinue.first().click({ delay: 50 }).catch(() => {});
+        await sleep(1500);
       }
-
-      const acknowledgeBtn = scope.locator('button:has-text("I Understand"), button:has-text("Proceed"), button:has-text("Dismiss"), button:has-text("OK")');
-      if (await acknowledgeBtn.count() > 0 && await acknowledgeBtn.first().isVisible()) {
-        logger(`   Handling dialog acknowledgement${isFrame ? ' in frame' : ''}...`);
-        await acknowledgeBtn.first().click({ delay: 50 }).catch(() => {});
-        await sleep(1000);
-      }
-
-      // 2. Specific EULA & terms checkboxes (never touch generic checkboxes or captcha frames!)
-      const eulaCheck = scope.locator('input#agree:not(:checked), input#eula:not(:checked), input[name="agree"]:not(:checked), input[data-testid*="eula"]:not(:checked)');
-      if (await eulaCheck.count() > 0 && await eulaCheck.first().isVisible()) {
-        logger(`   Accepting EULA / Terms checkbox${isFrame ? ' in frame' : ''}...`);
-        await eulaCheck.first().check().catch(() => {});
-        await sleep(500);
-
-        const acceptBtn = scope.locator('button:has-text("Accept"), button:has-text("ACCEPT"), button:has-text("I Agree"), button:has-text("I Accept")');
-        if (await acceptBtn.count() > 0 && await acceptBtn.first().isVisible()) {
-          await acceptBtn.first().click({ delay: 50 }).catch(() => {});
-          await sleep(1000);
-        }
-      }
-    } catch {}
-  };
-
-  await checkScope(page, false);
-  for (const frame of page.frames()) {
-    if (isSecurityOrCaptchaFrame(frame)) continue;
-    await checkScope(frame, true);
-  }
+    }
+  } catch {}
 }
 
 /**
  * Completes the checkout screen by finding and clicking "Add to library" or "Place Order".
- * Robustly waits for the button to finish initializing (bypassing .payment-loading--loading blur states),
- * handles agreement checkboxes/buttons, and retries if the order did not immediately submit.
+ * Uses authentic human mouse clicks and proactively handles interactive security verifications.
  */
-async function completeCheckout(page, logger = console.log) {
+async function completeCheckout(page, logger = console.log, game = {}) {
   logger('⏳ Waiting for checkout screen to load...');
 
   const candidateSelectors = [
     'button:has-text("Add to library")',
     'button:has-text("Add to Library")',
+    'button:has-text("ADD TO LIBRARY")',
+    '[role="button"]:has-text("Add to library")',
+    '[role="button"]:has-text("Add to Library")',
     'button:has-text("Place Order")',
     'button:has-text("Place order")',
     'button:has-text("PLACE ORDER")',
+    '[role="button"]:has-text("Place Order")',
     'button.payment-btn--primary',
     'button.payment-order-confirm__btn',
+    'button:has-text("Buy Now")',
+    'button:has-text("BUY NOW")',
   ];
 
   const maxAttempts = 35;
-  let clickAttempts = 0;
-  const maxClickAttempts = 2;
-
   for (let i = 0; i < maxAttempts; i++) {
-    // 0. If a captcha is active, do not click buttons or touch form fields
-    if (await isCaptchaActive(page)) {
-      logger('   🛡️ Security challenge / Captcha active. Waiting for verification to complete...');
-      await sleep(2500);
-      continue;
-    }
-
-    // 1. Handle any dialogs ("Device not supported", mature content, EULA) that block checkout
-    await handleDialogs(page, logger);
-
-    // 2. Handle EU refund agreement / terms across safe non-captcha scopes
-    const safeFrames = page.frames().filter(f => !isSecurityOrCaptchaFrame(f));
-    const scopes = [page, ...safeFrames];
-    for (const scope of scopes) {
-      try {
-        const euAgree = scope.locator('button:has-text("I Accept"), button:has-text("I Agree")');
-        if (await euAgree.count() > 0 && await euAgree.first().isVisible()) {
-          logger('   👉 Clicking checkout terms agreement (I Accept / I Agree)...');
-          await euAgree.first().click({ delay: 50 }).catch(() => {});
-          await sleep(500);
-        }
-
-        const requiredCheckbox = scope.locator('input#agree:not(:checked), input#eula:not(:checked), input[name="agree"]:not(:checked), input[data-testid*="eula"]:not(:checked)');
-        if (await requiredCheckbox.count() > 0 && await requiredCheckbox.first().isVisible()) {
-          logger('   👉 Checking required terms checkbox in checkout...');
-          await requiredCheckbox.first().check().catch(() => {});
-          await sleep(300);
-        }
-      } catch {}
-    }
-
-    // 3. Check if confirmation already appeared (order finished or fast-completed)
+    // 1. Check if order confirmation text is already visible
     try {
       const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
-      if (await confirmed.count() > 0 && await confirmed.first().isVisible()) {
+      if (await confirmed.count() > 0 && await confirmed.first().isVisible().catch(() => false)) {
         return true;
       }
     } catch {}
 
-    // 4. Look for checkout button across all scopes
-    let targetButton = null;
-    let targetText = '';
+    // 2. Handle any dialogs ("Device not supported", mature content, EULA) that block checkout
+    await handleDialogs(page, logger);
 
+    // 3. Scan non-captcha frames and main page for checkout button
+    const safeFrames = page.frames().filter(f => !isSecurityOrCaptchaFrame(f));
+    const scopes = [...safeFrames, page];
     for (const scope of scopes) {
       for (const sel of candidateSelectors) {
         try {
-          const btn = scope.locator(sel);
-          if (await btn.count() > 0 && await btn.first().isVisible()) {
-            const el = btn.first();
-            const text = (await el.innerText()).trim();
-            targetButton = el;
-            targetText = text || 'Place Order';
-            break;
+          const loc = scope.locator(sel);
+          const count = await loc.count().catch(() => 0);
+          for (let c = 0; c < count; c++) {
+            const btn = loc.nth(c);
+            const testId = (await btn.getAttribute('data-testid').catch(() => '')) || '';
+            // STRICTLY IGNORE background store page purchase CTA button
+            if (testId.includes('purchase-cta')) continue;
+
+            if (await btn.isVisible().catch(() => false)) {
+              const text = (await btn.innerText().catch(() => '')).trim();
+              if (/in library|owned|view in library|download/i.test(text)) continue;
+
+              logger(`👉 Found button "${text || 'Add to library'}" in checkout. Clicking...`);
+              await btn.scrollIntoViewIfNeeded().catch(() => {});
+              await sleep(400);
+              await humanClick(page, btn);
+              await sleep(1500);
+
+              // Check if an interactive security challenge / hCaptcha appeared
+              let captchaActive = false;
+              for (let check = 0; check < 3; check++) {
+                if (await isCaptchaActive(page)) {
+                  captchaActive = true;
+                  break;
+                }
+                await sleep(1000);
+              }
+
+              if (captchaActive) {
+                const isContextHeadless = page.context()?._isHeadless === true;
+                if (isContextHeadless) {
+                  logger('   🛡️ Security challenge (Captcha) encountered in headless mode.');
+                  logger('   👉 Requesting visible window assist...');
+                  return 'captcha_required';
+                }
+
+                logger('   🛡️ Security verification (Captcha) required by Epic Games.');
+                logger('   👉 Moving browser window to foreground so you can complete verification...');
+                await bringWindowToForeground(page);
+                sendNotification(
+                  'Claimr - Security Check Required 🛡️',
+                  `Epic Games requires a quick security check for ${game?.title || 'game'}. Please complete it in the browser window.`
+                );
+
+                const startCaptchaWait = Date.now();
+                const maxCaptchaWaitMs = 180000; // 3 minutes
+                while (Date.now() - startCaptchaWait < maxCaptchaWaitMs) {
+                  await sleep(2000);
+
+                  // Check if order confirmed while or after solving
+                  try {
+                    const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
+                    if (await confirmed.count() > 0 && await confirmed.first().isVisible().catch(() => false)) {
+                      logger('   🎉 Order confirmation detected!');
+                      return true;
+                    }
+                  } catch {}
+
+                  const stillActive = await isCaptchaActive(page);
+                  if (!stillActive) {
+                    logger('   ✅ Security verification completed! Processing order...');
+                    await sleep(1500);
+
+                    // Re-scan scopes for the "Place Order" / "Add to library" button in case it needs to be clicked with the solved token
+                    let reClicked = false;
+                    for (const checkScope of scopes) {
+                      for (const sel of candidateSelectors) {
+                        try {
+                          const postBtn = checkScope.locator(sel);
+                          if (await postBtn.count() > 0 && await postBtn.first().isVisible().catch(() => false)) {
+                            const btnText = (await postBtn.first().innerText().catch(() => '')).trim();
+                            if (/in library|owned|view in library|download/i.test(btnText)) {
+                              return true;
+                            }
+                            logger(`   👉 Clicking "${btnText || 'Place Order'}" to submit order with completed verification...`);
+                            await humanClick(page, postBtn.first());
+                            await sleep(2500);
+                            reClicked = true;
+                            break;
+                          }
+                        } catch {}
+                      }
+                      if (reClicked) break;
+                    }
+                    break;
+                  }
+                }
+
+                if (await isCaptchaActive(page)) {
+                  logger('   ⚠️ Security verification timed out or was not completed.');
+                  return false;
+                }
+              }
+
+              return true;
+            }
           }
         } catch {}
       }
-      if (targetButton) break;
     }
 
-    if (targetButton) {
-      // Check whether button is in a loading or disabled state
-      let isLoading = false;
-      try {
-        const hasLoader = (await targetButton.locator('.payment-loading--loading, .payment-loading__loader, .payment-loading__container--blur').count()) > 0;
-        const isDisabledAttr = (await targetButton.getAttribute('disabled')) !== null;
-        const isAriaDisabled = (await targetButton.getAttribute('aria-disabled')) === 'true';
-        const classNames = (await targetButton.getAttribute('class')) || '';
-        const hasDisabledClass = classNames.includes('payment-btn--disabled') || classNames.includes('disabled');
-
-        isLoading = hasLoader || isDisabledAttr || isAriaDisabled || hasDisabledClass;
-      } catch {}
-
-      if (isLoading) {
-        logger('   ⏳ Checkout button is initializing/loading, waiting...');
-        await sleep(1000);
-        continue;
+    try {
+      const euAgree = page.locator('button:has-text("I Accept"), button:has-text("I Agree")');
+      if (await euAgree.count() > 0 && await euAgree.first().isVisible().catch(() => false)) {
+        await euAgree.first().click().catch(() => {});
+        await sleep(500);
       }
-
-      // Button is ready and not loading. Buffer briefly so event listeners are fully attached.
-      await sleep(600);
-
-      logger(`👉 Found enabled button "${targetText}" in checkout. Clicking (attempt ${clickAttempts + 1}/${maxClickAttempts})...`);
-      clickAttempts++;
-
-      try {
-        await targetButton.scrollIntoViewIfNeeded().catch(() => {});
-        await targetButton.click({ delay: 100 });
-      } catch (err) {
-        logger(`   ⚠️ Click notice: ${err.message}. Retrying via force click...`);
-        await targetButton.click({ force: true, delay: 100 }).catch(() => {});
-      }
-
-      // Check whether a captcha appeared as a result of clicking checkout
-      let captchaAppeared = false;
-      for (let c = 0; c < 3; c++) {
-        await sleep(1000);
-        if (await isCaptchaActive(page)) {
-          captchaAppeared = true;
-          break;
-        }
-      }
-
-      if (captchaAppeared) {
-        logger('   🛡️ Security verification (Captcha) detected. Waiting for verification to complete (up to 90s)...');
-        await bringWindowToForeground(page);
-        const startCaptchaWait = Date.now();
-        while (Date.now() - startCaptchaWait < 90000) {
-          await sleep(2000);
-
-          // Check if confirmation appeared while completing captcha
-          try {
-            const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
-            if (await confirmed.count() > 0 && await confirmed.first().isVisible().catch(() => false)) {
-              return true;
-            }
-          } catch {}
-
-          if (!(await isCaptchaActive(page))) {
-            logger('   ✅ Security verification completed. Processing order...');
-            await sleep(3000);
-            break;
-          }
-        }
-      }
-
-      // Check whether the order is transitioning
-      await sleep(2000);
-
-      // Check if confirmation appeared
-      try {
-        const confirmed = page.locator('text=Thanks for your order!, text=Thank you for buying, text=Thank you!, text=Order Confirmed');
-        if (await confirmed.count() > 0 && await confirmed.first().isVisible()) {
-          return true;
-        }
-      } catch {}
-
-      // Check if button transitioned to loading / submitting state
-      try {
-        const isNowLoading = (await targetButton.locator('.payment-loading--loading, .payment-loading__loader').count()) > 0
-          || ((await targetButton.getAttribute('class')) || '').includes('loading');
-        if (isNowLoading) {
-          logger('   ⏳ Order submitted, processing transaction...');
-          return true;
-        }
-      } catch {
-        // If button is gone / detached, checkout succeeded or closed
-        return true;
-      }
-
-      // If we have reached max click attempts, proceed to confirmation verification loop
-      if (clickAttempts >= maxClickAttempts) {
-        return true;
-      }
-
-      // Otherwise loop will continue and retry if checkout overlay is still open
-      continue;
-    }
+    } catch {}
 
     await sleep(1000);
   }
@@ -476,79 +461,42 @@ export async function claimGame(page, game, history, { force = false, logger = c
   await page.goto(game.storeUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.DEFAULT_TIMEOUT });
   await sleep(2000);
 
-  // 2. Wait for any Cloudflare challenge ("Just a moment..." / "One more step") to resolve
-  for (let t = 0; t < 15; t++) {
-    const title = (await page.title().catch(() => '')) || '';
-    if (title.includes('Just a moment') || title.includes('One more step')) {
-      logger('   ⏳ Waiting for Cloudflare verification to clear...');
-      await handleCloudflareTurnstile(page, logger);
-      if (t >= 5) {
-        await bringWindowToForeground(page);
-      }
-      await sleep(1500);
-    } else {
-      break;
-    }
-  }
-
   await handleDialogs(page, logger);
 
-  // 3. Locate the primary purchase / CTA button across candidate selectors and safe scopes
-  const ctaSelectors = [
-    'button[data-testid="purchase-cta-button"]',
-    'aside button:has-text("Get")',
-    'aside button:has-text("GET")',
-    'aside button:has-text("In Library")',
-    'aside button:has-text("IN LIBRARY")',
-    'aside button:has-text("Owned")',
-    'aside button:has-text("OWNED")',
-    'button:has-text("Get")',
-    'button:has-text("GET")',
-    'button:has-text("In Library")',
-    'button:has-text("IN LIBRARY")',
-    'button:has-text("Owned")',
-    'button:has-text("OWNED")',
-  ];
-
-  let cta = null;
-  const startCtaWait = Date.now();
-  while (Date.now() - startCtaWait < 20000) {
-    const title = (await page.title().catch(() => '')) || '';
-    if (title.includes('Just a moment') || title.includes('One more step')) {
-      await handleCloudflareTurnstile(page, logger);
-      await sleep(1500);
-      continue;
+  // Locate the primary purchase / CTA button ("Get", "In Library")
+  let cta = page.locator('button[data-testid="purchase-cta-button"]');
+  try {
+    await cta.waitFor({ state: 'visible', timeout: 12000 });
+  } catch {
+    const handled = await handleCloudflareTurnstile(page, logger);
+    if (handled) {
+      await sleep(2000);
     }
-
     await handleDialogs(page, logger);
-
-    const scopes = [page, ...page.frames().filter(f => !isSecurityOrCaptchaFrame(f))];
-    for (const sel of ctaSelectors) {
-      for (const scope of scopes) {
-        try {
-          const locator = scope.locator(sel);
-          if (await locator.count() > 0 && await locator.first().isVisible().catch(() => false)) {
-            cta = locator.first();
-            break;
-          }
-        } catch {}
-      }
-      if (cta) break;
-    }
-
-    if (cta) break;
-    await sleep(1000);
+    try {
+      await cta.waitFor({ state: 'visible', timeout: 8000 });
+    } catch {}
   }
 
-  if (!cta) {
+  // Fallback to text selectors if data-testid changed
+  if ((await cta.count()) === 0 || !(await cta.first().isVisible().catch(() => false))) {
+    const fallbackCta = page.locator('aside button:has-text("Get"), aside button:has-text("GET"), button:has-text("Get"), button:has-text("GET"), button:has-text("In Library"), button:has-text("IN LIBRARY")');
+    if ((await fallbackCta.count()) > 0 && (await fallbackCta.first().isVisible().catch(() => false))) {
+      cta = fallbackCta.first();
+    }
+  }
+
+  if ((await cta.count()) === 0 || !(await cta.first().isVisible().catch(() => false))) {
     const finalTitle = (await page.title().catch(() => '')) || '';
     if (finalTitle.includes('Just a moment') || finalTitle.includes('One more step')) {
       logger('⚠️ Blocked by Cloudflare security check ("Just a moment...").');
-    } else {
-      logger('⚠️ Could not locate purchase button (data-testid="purchase-cta-button").');
+      return { status: 'cloudflare_blocked' };
     }
+    logger('⚠️ Could not locate purchase button (data-testid="purchase-cta-button").');
     return { status: 'error_button_not_found' };
   }
+
+  cta = cta.first();
 
   const btnText = (await cta.innerText()).toLowerCase().trim();
   logger(`   Button status: "${btnText}"`);
@@ -570,7 +518,7 @@ export async function claimGame(page, game, history, { force = false, logger = c
   }
 
   logger(`👉 Clicking "Get" for ${game.title}...`);
-  await cta.click();
+  await humanClick(page, cta);
 
   // Aggressively dismiss any modals ("Device not supported", mature content) that immediately appear
   for (let i = 0; i < 6; i++) {
@@ -578,8 +526,16 @@ export async function claimGame(page, game, history, { force = false, logger = c
     await handleDialogs(page, logger);
   }
 
-  const clicked = await completeCheckout(page, logger);
+  const clicked = await completeCheckout(page, logger, game);
+  if (clicked === 'captcha_required') {
+    logger('⚠️ Security challenge (Captcha) encountered in headless mode.');
+    return { status: 'captcha_required' };
+  }
   if (!clicked) {
+    if (await isCaptchaActive(page)) {
+      logger('⚠️ Blocked by security challenge.');
+      return { status: 'captcha_required' };
+    }
     logger('❌ Could not locate or click checkout confirmation button.');
     return { status: 'error_checkout_button_not_found' };
   }
@@ -631,16 +587,24 @@ export async function claimGame(page, game, history, { force = false, logger = c
     }
   } catch {}
 
-  // Final check: Authenticated order history API check (fast JSON verification)
-  try {
-    const isOwnedApi = await isGameInEpicLibrary(game, { page });
-    if (isOwnedApi) {
-      logger(`🎉 SUCCESS: "${game.title}" verified In Library via Epic API!`);
-      recordClaim(history, game, 'claimed', accountId, username);
-      sendNotification('Epic Games Freebie Claimed!', `Successfully claimed "${game.title}"!`);
-      return { status: 'claimed' };
-    }
-  } catch {}
+  // Final check: Authenticated order history API check (fast JSON verification with retries)
+  for (let poll = 0; poll < 3; poll++) {
+    try {
+      const isOwnedApi = await isGameInEpicLibrary(game, { page });
+      if (isOwnedApi) {
+        logger(`🎉 SUCCESS: "${game.title}" verified In Library via Epic API!`);
+        recordClaim(history, game, 'claimed', accountId, username);
+        sendNotification('Epic Games Freebie Claimed!', `Successfully claimed "${game.title}"!`);
+        return { status: 'claimed' };
+      }
+    } catch {}
+    await sleep(2000);
+  }
+
+  if (await isCaptchaActive(page)) {
+    logger('⚠️ Claim could not be completed because security verification was not finished.');
+    return { status: 'captcha_required' };
+  }
 
   logger('❌ Order was placed or attempted, but could not explicitly verify final confirmation in library.');
   logger('   Skipping history record so this title can be safely retried.');
@@ -709,15 +673,25 @@ export async function loginNewEpicAccount() {
 
     while (Date.now() - start < maxWaitMs) {
       await sleep(2500);
-      const cookies = await context.cookies();
+      let cookies = [];
+      try {
+        cookies = await context.cookies();
+      } catch {
+        break;
+      }
+
       const hasAuth = cookies.some((c) =>
         c.name === 'EPIC_BEARER_TOKEN' ||
         c.name === 'EPIC_SSO' ||
         c.name === 'EPIC_EG1'
       );
 
-      if (hasAuth && !page.url().includes('/id/login')) {
-        loggedIn = true;
+      try {
+        if (hasAuth && !page.url().includes('/id/login')) {
+          loggedIn = true;
+          break;
+        }
+      } catch {
         break;
       }
     }

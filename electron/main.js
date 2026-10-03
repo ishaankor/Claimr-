@@ -728,6 +728,9 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
     }
   };
 
+  const settings = loadSettings();
+  const isHeadless = settings.headless !== false;
+
   try {
     const isEpic = (store || '').toUpperCase() === 'EPIC';
 
@@ -735,13 +738,14 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
       sendLog('\n========================================');
       sendLog(`🚀 [START] Single-game claim automator for: ${gameTitle}`);
       sendLog('🎮 Platform: Epic Games Store');
+      sendLog(`⚙️ Browser Mode: ${isHeadless ? 'Headless (Silent background)' : 'Headed (Visible window)'}`);
 
       const activeEpic = getActiveAccount('epic');
       sendLog(`👤 Active Epic Profile: ${activeEpic?.username || 'Default'} (${activeEpic?.id || 'default'})`);
       sendLog(`🔗 Target: ${storeUrl || gameTitle}`);
 
       const profileDir = getFullProfileDir(activeEpic?.profileDir, 'epic');
-      const epicContext = await launchBrowser({ headless: true, profileDir });
+      const epicContext = await launchBrowser({ headless: isHeadless, profileDir });
       const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
       try {
@@ -753,31 +757,53 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
 
         const history = loadHistory();
         const game = { id: gameId, title: gameTitle, storeUrl };
-        const result = await claimGame(epicPage, game, history, {
+        let result = await claimGame(epicPage, game, history, {
           force: true,
           logger: sendLog,
           accountId: activeEpic?.id || 'default',
           username: activeEpic?.username,
         });
+
+        // Auto-recovery: If Cloudflare or Captcha blocks headless mode, retry with a visible window
+        if ((result?.status === 'cloudflare_blocked' || result?.status === 'captcha_required') && isHeadless) {
+          sendLog('\n⚠️ [Auto-Recovery] Security challenge or captcha detected in headless mode.');
+          sendLog('   Opening visible browser window for interactive verification...');
+          await epicContext.close().catch(() => {});
+          const fallbackContext = await launchBrowser({ headless: false, profileDir });
+          const fallbackPage = fallbackContext.pages().length > 0 ? fallbackContext.pages()[0] : await fallbackContext.newPage();
+          try {
+            await ensureLoggedIn(fallbackPage, { interactive: false, logger: sendLog });
+            result = await claimGame(fallbackPage, game, history, {
+              force: true,
+              logger: sendLog,
+              accountId: activeEpic?.id || 'default',
+              username: activeEpic?.username,
+            });
+          } finally {
+            await fallbackContext.close().catch(() => {});
+          }
+        }
+
         sendLog(`✨ [COMPLETE] Automator finished for: ${gameTitle}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('library:updated');
         }
         return { success: true, result };
       } finally {
-        await epicContext.close();
+        await epicContext.close().catch(() => {});
       }
     } else {
       // GOG
       sendLog('\n========================================');
       sendLog(`🚀 [START] Single-game claim automator for: ${gameTitle}`);
       sendLog('👾 Platform: GOG.com');
+      sendLog(`⚙️ Browser Mode: ${isHeadless ? 'Headless (Silent background)' : 'Headed (Visible window)'}`);
 
       const activeGog = getActiveAccount('gog');
       sendLog(`👤 Active GOG Profile: ${activeGog?.username || 'Default'} (${activeGog?.id || 'default'})`);
 
       const result = await claimGog({
-        headless: true,
+        headless: isHeadless,
         logger: sendLog,
         accountId: activeGog?.id || 'default',
         username: activeGog?.username,
@@ -813,10 +839,11 @@ function loadSettings() {
     if (fs.existsSync(file)) {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
       if (parsed.autoClaim === undefined) parsed.autoClaim = true;
+      if (parsed.headless === undefined) parsed.headless = true;
       return parsed;
     }
   } catch {}
-  return { autoClaim: true, lastCheckSlot: null, lastCheckDate: null };
+  return { autoClaim: true, headless: true, lastCheckSlot: null, lastCheckDate: null };
 }
 
 function saveSettings(settings) {
@@ -841,9 +868,13 @@ async function executeAutoClaimInBackground() {
     }
   };
 
+  const settings = loadSettings();
+  const isHeadless = settings.headless !== false;
+
   sendLog('\n========================================');
-  sendLog('⏰ [Auto-Claim] Zero-touch background claim started...');
+  sendLog('⏰ [Auto-Claim] Automated claim engine started...');
   sendLog(`🖥️ Platform: ${process.platform} • Multi-Account Auto Engine`);
+  sendLog(`⚙️ Browser Mode: ${isHeadless ? 'Headless (Silent background)' : 'Headed (Visible window)'}`);
 
   const claimedGames = [];
 
@@ -872,7 +903,7 @@ async function executeAutoClaimInBackground() {
 
         sendLog(`\n👉 Processing ${unclaimed.length} game(s) for Epic account: ${acc.username || acc.id}`);
         const profileDir = getFullProfileDir(acc.profileDir, 'epic');
-        const epicContext = await launchBrowser({ headless: true, profileDir });
+        const epicContext = await launchBrowser({ headless: isHeadless, profileDir });
         const epicPage = epicContext.pages().length > 0 ? epicContext.pages()[0] : await epicContext.newPage();
 
         try {
@@ -881,12 +912,31 @@ async function executeAutoClaimInBackground() {
             sendLog(`⚠️ Epic session expired or unauthenticated for ${acc.username || acc.id}. Skipping.`);
           } else {
             for (const game of unclaimed) {
-              const res = await claimGame(epicPage, game, freshHistory, {
+              let res = await claimGame(epicPage, game, freshHistory, {
                 force: false,
                 logger: sendLog,
                 accountId: acc.id,
                 username: acc.username,
               });
+
+              if ((res?.status === 'cloudflare_blocked' || res?.status === 'captcha_required') && isHeadless) {
+                sendLog(`\n⚠️ [Auto-Recovery] Security verification required for "${game.title}". Switching to visible window...`);
+                await epicContext.close().catch(() => {});
+                const fallbackContext = await launchBrowser({ headless: false, profileDir });
+                const fallbackPage = fallbackContext.pages().length > 0 ? fallbackContext.pages()[0] : await fallbackContext.newPage();
+                try {
+                  await ensureLoggedIn(fallbackPage, { interactive: false, logger: sendLog });
+                  res = await claimGame(fallbackPage, game, freshHistory, {
+                    force: false,
+                    logger: sendLog,
+                    accountId: acc.id,
+                    username: acc.username,
+                  });
+                } finally {
+                  await fallbackContext.close().catch(() => {});
+                }
+              }
+
               if (res && res.status === 'claimed') {
                 claimedGames.push(`${game.title} (${acc.username || 'Epic'})`);
               }
@@ -919,7 +969,7 @@ async function executeAutoClaimInBackground() {
 
         sendLog(`\n👉 Claiming GOG giveaway "${gogGiveaway.title}" for account: ${acc.username || acc.id}`);
         const gogRes = await claimGog({
-          headless: true,
+          headless: isHeadless,
           logger: sendLog,
           accountId: acc.id,
           username: acc.username,
@@ -1056,6 +1106,20 @@ function startScheduler() {
 ipcMain.handle('service:get-status', async () => {
   const settings = loadSettings();
   return { active: !!settings.autoClaim };
+});
+
+ipcMain.handle('headless:get-status', async () => {
+  const settings = loadSettings();
+  return { active: settings.headless !== false };
+});
+
+ipcMain.handle('headless:toggle', async (_event, shouldEnable) => {
+  const settings = loadSettings();
+  settings.headless = !!shouldEnable;
+  saveSettings(settings);
+
+  console.log(`⚙️ Headless Mode is now: ${settings.headless ? 'ENABLED' : 'DISABLED'}`);
+  return { active: settings.headless };
 });
 
 ipcMain.handle('service:toggle', async (_event, shouldEnable) => {

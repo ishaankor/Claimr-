@@ -1,5 +1,6 @@
 {
   "autoClaim": true,
+  "headless": true,
   "lastCheckSlot": null,
   "lastCheckDate": null
 }

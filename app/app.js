@@ -38,6 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeConsoleBtn = document.getElementById('closeConsoleBtn');
 
   const serviceCheckbox = document.getElementById('serviceCheckbox');
+  const headlessCheckbox = document.getElementById('headlessCheckbox');
   const historyBtn = document.getElementById('historyBtn');
   const historyModal = document.getElementById('historyModal');
   const closeHistoryModal = document.getElementById('closeHistoryModal');
@@ -792,6 +793,59 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // -------------------------------------------------------------
+  // Headless Mode Switch
+  // -------------------------------------------------------------
+
+  function updateHeadlessLabel(isActive) {
+    const label = document.getElementById('headlessLabel');
+    if (label) {
+      label.textContent = isActive ? 'Headless: ON' : 'Headless: OFF';
+    }
+  }
+
+  async function checkHeadlessStatus() {
+    try {
+      const res = await window.claimrAPI.getHeadlessStatus();
+      if (headlessCheckbox) {
+        headlessCheckbox.checked = res?.active !== false;
+        updateHeadlessLabel(headlessCheckbox.checked);
+      }
+    } catch (e) {
+      console.warn('Could not read headless mode status:', e);
+    }
+  }
+
+  const headlessContainer = document.getElementById('headlessToggleContainer');
+  if (headlessContainer && headlessCheckbox) {
+    headlessContainer.addEventListener('click', (e) => {
+      if (e.target !== headlessCheckbox && !e.target.closest('.switch')) {
+        headlessCheckbox.checked = !headlessCheckbox.checked;
+        headlessCheckbox.dispatchEvent(new Event('change'));
+      }
+    });
+  }
+
+  if (headlessCheckbox) {
+    headlessCheckbox.addEventListener('change', async () => {
+      const checked = headlessCheckbox.checked;
+      updateHeadlessLabel(checked);
+      headlessCheckbox.disabled = true;
+      logToTerminal(`\n⚙️ [Browser Engine] Setting headless mode: ${checked ? 'ENABLED (Silent background)' : 'DISABLED (Visible browser window)'}...`);
+
+      try {
+        const res = await window.claimrAPI.toggleHeadless(checked);
+        headlessCheckbox.checked = res?.active !== false;
+        updateHeadlessLabel(headlessCheckbox.checked);
+        logToTerminal(`⚙️ [Browser Engine] Headless mode is now ${headlessCheckbox.checked ? 'ACTIVE (Silent background)' : 'DISABLED (Visible browser window)'}.`);
+      } catch (err) {
+        logToTerminal(`❌ [Browser Engine] Failed to change headless mode: ${err.message}`);
+      } finally {
+        headlessCheckbox.disabled = false;
+      }
+    });
+  }
+
+  // -------------------------------------------------------------
   // History Modal
   // -------------------------------------------------------------
 
@@ -891,6 +945,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 4. Progressively fetch fresh promotions (Epic in ~120ms, GOG in ~400ms)
     await loadGames({ forceFetch: false });
     checkServiceStatus();
+    checkHeadlessStatus();
 
     // 5. Request native system notification permission if not yet determined
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {

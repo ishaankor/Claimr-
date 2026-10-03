@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('claimrAPI', {
   removeAccount: (store, accountId) => ipcRenderer.invoke('accounts:remove', { store, accountId }),
   getServiceStatus: () => ipcRenderer.invoke('service:get-status'),
   toggleService: (shouldEnable) => ipcRenderer.invoke('service:toggle', shouldEnable),
+  getHeadlessStatus: () => ipcRenderer.invoke('headless:get-status'),
+  toggleHeadless: (shouldEnable) => ipcRenderer.invoke('headless:toggle', shouldEnable),
   onClaimLog: (callback) => {
     const subscription = (_event, value) => callback(value);
     ipcRenderer.on('claim:log', subscription);

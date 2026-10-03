@@ -23,13 +23,22 @@
 
       <div class="header-actions">
         <!-- Background Service Toggle -->
-        <label class="service-pill" id="serviceToggleContainer" for="serviceCheckbox" title="Toggle background auto-claim">
+        <div class="service-pill" id="serviceToggleContainer" title="Toggle background auto-claim">
           <span class="service-label">Auto-Claim</span>
-          <span class="switch">
+          <label class="switch" for="serviceCheckbox">
             <input type="checkbox" id="serviceCheckbox">
             <span class="slider"></span>
-          </span>
-        </label>
+          </label>
+        </div>
+
+        <!-- Headless Mode Toggle -->
+        <div class="service-pill" id="headlessToggleContainer" title="Toggle headless mode (ON = run browser silently in background; OFF = show visible window)">
+          <span class="service-label" id="headlessLabel">Headless</span>
+          <label class="switch" for="headlessCheckbox">
+            <input type="checkbox" id="headlessCheckbox" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
 
         <button class="btn btn-secondary" id="historyBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

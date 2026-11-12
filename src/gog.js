@@ -28,7 +28,6 @@ export async function launchGogBrowser({ headless = false, profileDir, log } = {
     viewport: { width: 1366, height: 850 },
     locale: 'en-US',
     args: [
-      '--disable-blink-features=AutomationControlled',
       ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ],
   }, log);

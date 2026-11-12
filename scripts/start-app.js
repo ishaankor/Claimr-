@@ -1,9 +1,12 @@
 import { spawn } from 'child_process';
 import electron from 'electron';
 
+const appEnv = { ...process.env, ELECTRON_ENABLE_LOGGING: 'false' };
+delete appEnv.ELECTRON_RUN_AS_NODE;
+
 const child = spawn(electron, ['.'], {
   stdio: ['inherit', 'pipe', 'pipe'],
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: 'false' },
+  env: appEnv,
 });
 
 child.stdout.pipe(process.stdout);

@@ -9,33 +9,69 @@ const require = createRequire(import.meta.url);
 const activeProfileLocks = new Map();
 
 const STEALTH_ARGS = [
-  '--disable-blink-features=AutomationControlled',
   '--no-first-run',
   '--no-default-browser-check',
   ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
 ];
 
+let cachedStealthScripts = null;
+
+function getStealthEvasionScripts() {
+  if (cachedStealthScripts) return cachedStealthScripts;
+  const scripts = [];
+  try {
+    const createStealthPlugin = require('puppeteer-extra-plugin-stealth');
+    const stealth = createStealthPlugin();
+    const mockPage = {
+      evaluateOnNewDocument: (fn, ...args) => {
+        scripts.push({ fn, args });
+      }
+    };
+    for (const name of stealth.enabledEvasions) {
+      // 1. NEVER override native Chrome User-Agent & Client Hints
+      if (name === 'user-agent-override') continue;
+      // 2. NEVER proxy WebGL getParameter: Arkose Labs (Epic login & checkout) explicitly
+      // checks WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]')
+      // and fails submission with "Incorrect response. Please refresh the page."
+      if (name === 'webgl.vendor') continue;
+      // 3. Do not override navigator.webdriver with synthetic getters
+      if (name === 'navigator.webdriver') continue;
+
+      try {
+        const evasion = require(`puppeteer-extra-plugin-stealth/evasions/${name}`)();
+        if (typeof evasion.onPageCreated === 'function') {
+          evasion.onPageCreated(mockPage);
+        }
+      } catch {}
+    }
+  } catch {}
+  cachedStealthScripts = scripts;
+  return cachedStealthScripts;
+}
+
 /**
  * Injects anti-bot and stealth scripts into the browser context.
- * Masks automation fingerprints including navigator.webdriver, window.chrome,
- * and navigator.plugins that cause Cloudflare Turnstile to block or loop.
+ * Masks automation fingerprints in headless mode while strictly preserving
+ * native prototypes ([native code]) so Arkose Labs and Cloudflare do not flag tampering.
  * 
  * @param {BrowserContext} context
+ * @param {boolean} [isHeadless=false]
  */
-export async function applyStealthScripts(context) {
-  await context.addInitScript(() => {
-    // 1. Preserve native navigator.webdriver getter if already [native code] and false
-    // Overriding it with an arrow function causes Arkose Labs (Epic login) to detect tampering
-    // and fail submission with "Incorrect response. Please refresh the page."
-    try {
-      const proto = Object.getPrototypeOf(navigator);
-      const desc = Object.getOwnPropertyDescriptor(proto, 'webdriver');
-      if (navigator.webdriver === true) {
-        delete proto.webdriver;
-      }
-    } catch (e) {}
+export async function applyStealthScripts(context, isHeadless = false) {
+  // If running in headed / interactive mode (e.g. login), Google Chrome is already 100% genuine.
+  // DO NOT inject synthetic scripts or delete prototype descriptors, as Arkose Labs detects tampering.
+  if (!isHeadless) return;
 
-    // 2. Ensure window.chrome exists only if completely missing
+  const evasions = getStealthEvasionScripts();
+  for (const { fn, args } of evasions) {
+    try {
+      await context.addInitScript(fn, ...args);
+    } catch {}
+  }
+
+  // Clean anti-bot evasion for headless mode only
+  await context.addInitScript(() => {
+    // 1. Ensure window.chrome exists in headless mode
     try {
       if (!window.chrome) {
         window.chrome = {
@@ -46,104 +82,55 @@ export async function applyStealthScripts(context) {
       }
     } catch (e) {}
 
-    // 3. Mock authentic plugins in headless mode only if completely empty
+    // 2. Ensure screen dimensions are realistic in headless mode
     try {
-      if (!navigator.plugins || navigator.plugins.length === 0) {
-        const dummyPlugins = [
-          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-          { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-        ];
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => dummyPlugins,
-        });
-      }
-    } catch (e) {}
-
-    // 4. Ensure languages are populated only if missing
-    try {
-      if (!navigator.languages || navigator.languages.length === 0) {
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['en-US', 'en'],
-        });
+      if (window.outerWidth === 0 && window.outerHeight === 0) {
+        window.outerWidth = 1366;
+        window.outerHeight = 850;
       }
     } catch (e) {}
   });
 }
 
 /**
- * Automatically detects and solves Cloudflare Turnstile if present on the page.
+ * Detects if a page is currently gated by Cloudflare Turnstile / "Just a moment..." challenge.
+ * In visible mode, prompts and waits for the user to complete verification directly in the browser.
  * 
  * @param {Page} page
  * @param {Function} [logger]
- * @returns {Promise<boolean>} Whether a challenge was handled
+ * @param {number} [maxWaitSec=90]
+ * @returns {Promise<boolean>} Whether the challenge was cleared
  */
-export async function handleCloudflareTurnstile(page, logger = console.log) {
+export async function waitForCloudflareResolution(page, logger = console.log, maxWaitSec = 90) {
   try {
-    const isCloudflareTitle = async () => {
+    const checkStatus = async () => {
       const title = (await page.title().catch(() => '')) || '';
-      return title.includes('Just a moment') || title.includes('One more step');
+      const url = (page.url() || '').toLowerCase();
+      const isChallenge = title.includes('Just a moment') ||
+                          title.includes('One more step') ||
+                          url.includes('challenges.cloudflare.com') ||
+                          url.includes('/cdn-cgi/challenge-platform');
+      return { isChallenge, title, url };
     };
 
-    if (!(await isCloudflareTitle())) {
-      return false;
+    const initial = await checkStatus();
+    if (!initial.isChallenge) {
+      return true;
     }
 
-    // 1. Check if token already populated
-    for (const scope of [page, ...page.frames()]) {
-      try {
-        const responseInput = scope.locator('[name*="cf-turnstile-response"], [name*="cf-chl-widget"], input[type="hidden"]');
-        if (await responseInput.count() > 0) {
-          const val = await responseInput.first().inputValue().catch(() => '');
-          if (val && val.length > 10) return true;
-        }
-      } catch {}
-    }
+    logger?.('🛡️ Cloudflare security check detected. Please complete the verification in the opened browser window...');
 
-    // 2. Check child frames (where Turnstile widget iframe lives) first!
-    const cfFrame = page.frames().find(f => {
-      const url = (f.url() || '').toLowerCase();
-      return url.includes('challenges.cloudflare.com') || url.includes('turnstile');
-    });
+    // Bring window to front so the user sees the challenge
+    await bringWindowToForeground(page).catch(() => {});
 
-    if (cfFrame) {
-      const checkbox = cfFrame.locator('input[type="checkbox"], .ctp-checkbox-label, span.mark, div.checkbox');
-      if (await checkbox.count() > 0 && await checkbox.first().isVisible().catch(() => false)) {
-        logger?.('   🛡️ Cloudflare verification detected in frame. Completing security check...');
-        await new Promise((r) => setTimeout(r, 600));
-        const box = await checkbox.first().boundingBox().catch(() => null);
-        if (box) {
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 }).catch(() => {});
-          await new Promise((r) => setTimeout(r, 100));
-          await page.mouse.down().catch(() => {});
-          await new Promise((r) => setTimeout(r, 100));
-          await page.mouse.up().catch(() => {});
-        } else {
-          await checkbox.first().click().catch(() => {});
-        }
-      }
-    } else {
-      // 3. Check for Turnstile iframe on page
-      const iframeLoc = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"], iframe[src*="turnstile"]');
-      if (await iframeLoc.count() > 0 && await iframeLoc.first().isVisible().catch(() => false)) {
-        logger?.('   🛡️ Cloudflare verification detected. Completing security check...');
-        const box = await iframeLoc.first().boundingBox().catch(() => null);
-        if (box) {
-          const clickX = box.x + Math.min(32, box.width / 4);
-          const clickY = box.y + box.height / 2;
-          await page.mouse.move(clickX, clickY, { steps: 5 }).catch(() => {});
-          await new Promise((r) => setTimeout(r, 100));
-          await page.mouse.down().catch(() => {});
-          await new Promise((r) => setTimeout(r, 100));
-          await page.mouse.up().catch(() => {});
-        }
-      }
-    }
-
-    // Wait up to 6s for title to clear
-    for (let t = 0; t < 12; t++) {
-      await new Promise((r) => setTimeout(r, 500));
-      if (!(await isCloudflareTitle())) {
+    for (let t = 0; t < maxWaitSec; t++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const status = await checkStatus();
+      // Only consider it cleared once NOT in a challenge, title is non-empty, and back on the store page
+      if (!status.isChallenge && status.title.trim().length > 0 && !status.url.includes('challenges.cloudflare.com')) {
+        logger?.('✅ Cloudflare security check cleared!');
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await new Promise((r) => setTimeout(r, 3000));
         return true;
       }
     }
@@ -472,27 +459,56 @@ export async function launchBrowserContext(targetDir, options = {}, log = consol
     }
   }
 
-  // Intercept context.close to safely release profile lock and clean up Singleton files
-  if (release) {
-    const originalClose = context.close.bind(context);
-    context.close = async (...args) => {
-      try {
-        return await originalClose(...args);
-      } finally {
+  // Intercept context.close to safely persist cookies, release profile lock and clean up Singleton files
+  const originalClose = context.close.bind(context);
+  context.close = async (...args) => {
+    try {
+      if (resolvedDir) {
+        try {
+          const freshCookies = await context.cookies().catch(() => []);
+          if (Array.isArray(freshCookies) && freshCookies.length > 0) {
+            fs.writeFileSync(path.join(resolvedDir, 'cookies.json'), JSON.stringify(freshCookies, null, 2), 'utf-8');
+          }
+        } catch {}
+      }
+      return await originalClose(...args);
+    } finally {
+      if (release) {
         if (resolvedDir) {
           const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
           for (const lock of lockFiles) {
             try { fs.unlinkSync(path.join(resolvedDir, lock)); } catch {}
           }
           activeProfileLocks.delete(resolvedDir);
-          release();
         }
+        release();
       }
-    };
+    }
+  };
+
+  // Hydrate session cookies from cookies.json if present (e.g. from native Electron login)
+  if (resolvedDir) {
+    const cookiesFile = path.join(resolvedDir, 'cookies.json');
+    if (fs.existsSync(cookiesFile)) {
+      try {
+        const raw = fs.readFileSync(cookiesFile, 'utf-8');
+        const cookies = JSON.parse(raw);
+        if (Array.isArray(cookies) && cookies.length > 0) {
+          const now = Date.now() / 1000;
+          const valid = cookies.filter((c) => !c.expires || c.expires === -1 || c.expires > now);
+          if (valid.length > 0) {
+            await context.addCookies(valid);
+            log?.(`[Browser] Hydrated ${valid.length} session cookies from cookies.json`);
+          }
+        }
+      } catch (err) {
+        log?.(`[Browser] Notice reading cookies.json: ${err.message}`);
+      }
+    }
   }
 
   // Inject stealth and anti-bot evasions into all pages in this context
-  await applyStealthScripts(context);
+  await applyStealthScripts(context, isHeadless);
   context._isHeadless = isHeadless;
   return context;
 }

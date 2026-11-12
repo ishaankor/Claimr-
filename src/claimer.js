@@ -1,9 +1,10 @@
 import { chromium } from 'playwright';
+import { createCursor } from 'ghost-cursor';
 import { CONFIG } from './config.js';
 import { isGameClaimed, recordClaim, loadHistory } from './history.js';
 import { sendNotification } from './notify.js';
 import { getActiveProfileDir, getFullProfileDir, createNewProfileDir, registerAccount } from './accounts.js';
-import { launchBrowserContext, handleCloudflareTurnstile, bringWindowToForeground } from './browser.js';
+import { launchBrowserContext, waitForCloudflareResolution, bringWindowToForeground } from './browser.js';
 import { getPromotions } from './api.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -18,26 +19,27 @@ export async function launchBrowser({ headless = false, profileDir, log } = {}) 
     viewport: { width: 1366, height: 850 },
     locale: CONFIG.LOCALE,
     args: [
-      '--disable-blink-features=AutomationControlled',
       ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ],
   }, log);
 
-  // Pre-seed cookies to bypass consent and mature age verification modals
-  await context.addCookies([
-    {
-      name: 'OptanonAlertBoxClosed',
-      value: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
-      domain: '.epicgames.com',
-      path: '/',
-    },
-    {
-      name: 'HasAcceptedAgeGates',
-      value: 'USK:9007199254740991,general:18,EPIC SUGGESTED RATING:18',
-      domain: 'store.epicgames.com',
-      path: '/',
-    },
-  ]);
+  // Only pre-seed consent cookies for headless runs; in interactive mode, let OneTrust load naturally
+  if (headless) {
+    await context.addCookies([
+      {
+        name: 'OptanonAlertBoxClosed',
+        value: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+        domain: '.epicgames.com',
+        path: '/',
+      },
+      {
+        name: 'HasAcceptedAgeGates',
+        value: 'USK:9007199254740991,general:18,EPIC SUGGESTED RATING:18',
+        domain: 'store.epicgames.com',
+        path: '/',
+      },
+    ]);
+  }
 
   return context;
 }
@@ -122,16 +124,36 @@ export async function ensureLoggedIn(page, { interactive = true, logger = consol
   return false;
 }
 
+const cursorCache = new WeakMap();
+
 /**
- * Simulates authentic human cursor trajectory and click to avoid bot heuristics and trusted-event flags.
+ * Simulates authentic human cursor trajectory and click using ghost-cursor (natural Bézier curves)
+ * to avoid anti-bot heuristic flags from Arkose Labs and Cloudflare.
  */
 async function humanClick(page, locator) {
+  try {
+    let cursor = cursorCache.get(page);
+    if (!cursor) {
+      cursor = createCursor(page);
+      cursorCache.set(page, cursor);
+    }
+    const element = await locator.elementHandle().catch(() => null);
+    if (element) {
+      await cursor.click(element, {
+        paddingPercentage: 15,
+        waitBeforeClick: [120, 280],
+        waitBetweenClick: [60, 140],
+      });
+      return;
+    }
+  } catch {}
+
   try {
     const box = await locator.boundingBox().catch(() => null);
     if (box && box.width > 0 && box.height > 0) {
       const targetX = box.x + box.width * (0.35 + Math.random() * 0.3);
       const targetY = box.y + box.height * (0.35 + Math.random() * 0.3);
-      await page.mouse.move(targetX, targetY, { steps: 8 }).catch(() => {});
+      await page.mouse.move(targetX, targetY, { steps: 12 }).catch(() => {});
       await sleep(150 + Math.random() * 120);
       await page.mouse.down().catch(() => {});
       await sleep(70 + Math.random() * 60);
@@ -248,6 +270,16 @@ async function handleDialogs(page, logger = console.log) {
     if (await acknowledgeBtn.count() > 0 && await acknowledgeBtn.first().isVisible().catch(() => false)) {
       await acknowledgeBtn.first().click({ delay: 50 }).catch(() => {});
       await sleep(1000);
+    }
+
+    // Dismiss post-purchase "Is Epic Games Launcher installed?" prompt
+    const launcherModal = page.locator('div[role="dialog"]:has-text("Epic Games Launcher"), div:has-text("Is Epic Games Launcher installed?")');
+    if (await launcherModal.count() > 0 && await launcherModal.first().isVisible().catch(() => false)) {
+      const closeBtn = page.locator('button[aria-label="Close"], button[aria-label="close"], button:has-text("Yes, it\'s installed")');
+      if (await closeBtn.count() > 0 && await closeBtn.first().isVisible().catch(() => false)) {
+        await closeBtn.first().click().catch(() => {});
+        await sleep(800);
+      }
     }
 
     const eulaCheck = page.locator('input#agree, input#eula, input[name="agree"]');
@@ -463,18 +495,33 @@ export async function claimGame(page, game, history, { force = false, logger = c
 
   await handleDialogs(page, logger);
 
+  // Check if blocked by Cloudflare verification gate
+  const pageTitle = (await page.title().catch(() => '')) || '';
+  if (pageTitle.includes('Just a moment') || pageTitle.includes('One more step')) {
+    const isHeadless = !!page.context()?._isHeadless;
+    if (isHeadless) {
+      logger('⚠️ Blocked by Cloudflare security check ("Just a moment...").');
+      return { status: 'cloudflare_blocked' };
+    }
+
+    // In visible window, allow user to complete verification directly
+    const cleared = await waitForCloudflareResolution(page, logger, 60);
+    if (!cleared) {
+      logger('⚠️ Cloudflare security check was not completed.');
+      return { status: 'cloudflare_blocked' };
+    }
+    await sleep(2000);
+    await handleDialogs(page, logger);
+  }
+
   // Locate the primary purchase / CTA button ("Get", "In Library")
   let cta = page.locator('button[data-testid="purchase-cta-button"]');
   try {
     await cta.waitFor({ state: 'visible', timeout: 12000 });
   } catch {
-    const handled = await handleCloudflareTurnstile(page, logger);
-    if (handled) {
-      await sleep(2000);
-    }
     await handleDialogs(page, logger);
     try {
-      await cta.waitFor({ state: 'visible', timeout: 8000 });
+      await cta.waitFor({ state: 'visible', timeout: 5000 });
     } catch {}
   }
 
@@ -659,6 +706,21 @@ export async function getEpicUsername(page) {
  */
 export async function loginNewEpicAccount() {
   console.log('➕ Adding new Epic Games account...');
+
+  // Prefer native Electron login window to bypass Arkose Labs CDP detection
+  try {
+    const electronModule = await import('electron').catch(() => null);
+    const electronBinary = electronModule?.default;
+    if (electronBinary && typeof electronBinary === 'string') {
+      const { spawnSync } = await import('child_process');
+      const env = { ...process.env, ELECTRON_ENABLE_LOGGING: 'false' };
+      delete env.ELECTRON_RUN_AS_NODE;
+      spawnSync(electronBinary, ['.', '--login:epic'], { stdio: 'inherit', env });
+      const active = getActiveAccount('epic');
+      return { success: !!active, account: active };
+    }
+  } catch {}
+
   const { id, relPath, fullPath } = createNewProfileDir('epic');
   const context = await launchBrowser({ headless: false, profileDir: fullPath });
   const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();

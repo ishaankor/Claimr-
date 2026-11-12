@@ -61,7 +61,21 @@ async function runClaimer() {
 
   // 1. Handle Login-only requests
   if (isEpicLoginOnly) {
-    console.log('\n🚀 Starting Epic Games browser login session...');
+    console.log('\n🚀 Starting Epic Games native login session...');
+    try {
+      const electronModule = await import('electron').catch(() => null);
+      const electronBinary = electronModule?.default;
+      if (electronBinary && typeof electronBinary === 'string') {
+        const { spawnSync } = await import('child_process');
+        const env = { ...process.env, ELECTRON_ENABLE_LOGGING: 'false' };
+        delete env.ELECTRON_RUN_AS_NODE;
+        spawnSync(electronBinary, ['.', '--login:epic'], { stdio: 'inherit', env });
+        return;
+      }
+    } catch (e) {
+      console.warn('Native login spawn notice:', e.message);
+    }
+
     const context = await launchBrowser({ headless: false });
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     try {

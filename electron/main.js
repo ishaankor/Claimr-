@@ -25,6 +25,45 @@ app.commandLine.appendSwitch('disable-logging');
 app.setName('Claimr');
 app.name = 'Claimr';
 
+// Anti-bot stealth configuration for native Electron Chromium instances
+const chromeMajorVersion = (process.versions.chrome || '133').split('.')[0];
+const chromeFullVersion = process.versions.chrome || '133.0.6943.142';
+
+function getStealthUserAgent() {
+  if (process.platform === 'win32') {
+    return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeFullVersion} Safari/537.36`;
+  } else if (process.platform === 'darwin') {
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeFullVersion} Safari/537.36`;
+  }
+  return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeFullVersion} Safari/537.36`;
+}
+
+const STEALTH_UA = getStealthUserAgent();
+app.userAgentFallback = STEALTH_UA;
+
+/**
+ * Strips Electron and Claimr markers from request headers and User-Agent
+ * so Cloudflare Turnstile and Arkose Labs see a genuine Google Chrome browser.
+ */
+function configureSessionStealth(ses) {
+  ses.setUserAgent(STEALTH_UA);
+
+  try {
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      const requestHeaders = { ...details.requestHeaders };
+      if (requestHeaders['User-Agent']) {
+        requestHeaders['User-Agent'] = STEALTH_UA;
+      }
+      if (requestHeaders['sec-ch-ua']) {
+        requestHeaders['sec-ch-ua'] = requestHeaders['sec-ch-ua']
+          .replace(/"Electron";v="[^"]*"/g, `"Google Chrome";v="${chromeMajorVersion}"`)
+          .replace(/"Claimr";v="[^"]*"/g, `"Google Chrome";v="${chromeMajorVersion}"`);
+      }
+      callback({ requestHeaders });
+    });
+  } catch (_) {}
+}
+
 let activeToastWindow = null;
 let toastTimeout = null;
 
@@ -647,6 +686,164 @@ ipcMain.handle('store:sync-library', async () => {
 let activeEpicLoginWindow = null;
 
 /**
+ * Automatically detects and clicks the saved account card on Epic's "Welcome back" screen.
+ * Employs multi-layer fallback:
+ * 1. Finds element by email pattern or username and walks up to the card container.
+ * 2. Finds element immediately above "Use another account" button.
+ * 3. Finds item located between "Welcome back" heading and "or" divider.
+ * 4. Dispatches both synthetic DOM events AND native Chromium OS mouse events (sendInputEvent) at exact coordinates.
+ * 5. Scans both the main document and all sub-frames.
+ */
+async function tryClickWelcomeBackAccount(win, targetUsername = '', logger = console.log) {
+  if (!win || win.isDestroyed()) return false;
+
+  const script = `
+    (() => {
+      const bodyText = (document.body ? document.body.innerText : '') || '';
+      const docTitle = document.title || '';
+      if (!bodyText.includes('Welcome back') && !docTitle.includes('Confirm Your Account')) {
+        return null;
+      }
+
+      const allElements = Array.from(document.querySelectorAll('*'));
+
+      // 1. Find leaf element with email address (e.g., any masked email)
+      const emailEl = allElements.find(el => {
+        if (el.children.length > 2) return false;
+        const txt = (el.innerText || '').trim();
+        return /@.*\\./.test(txt) && !txt.includes('\\n');
+      });
+
+      // 2. Find by target username if known
+      const targetUser = ${JSON.stringify(targetUsername || '')}.trim().toLowerCase();
+      const userEl = targetUser ? allElements.find(el => {
+        if (el.children.length > 2) return false;
+        const txt = (el.innerText || '').trim().toLowerCase();
+        return (txt === targetUser || txt.includes(targetUser)) && !txt.includes('welcome');
+      }) : null;
+
+      const anchor = emailEl || userEl;
+      let targetCard = null;
+
+      if (anchor) {
+        let curr = anchor;
+        while (curr && curr !== document.body) {
+          const parent = curr.parentElement;
+          if (!parent) break;
+          const pTxt = parent.innerText || '';
+          if (pTxt.includes('Use another account') || pTxt.includes('Manage accounts') || pTxt.includes('Privacy Policy')) {
+            targetCard = curr;
+            break;
+          }
+          curr = parent;
+        }
+      }
+
+      // 3. Fallback: element immediately preceding "Use another account" container
+      if (!targetCard) {
+        const useAnother = allElements.find(el => (el.innerText || '').trim() === 'Use another account');
+        if (useAnother) {
+          let curr = useAnother;
+          while (curr && curr !== document.body) {
+            const parent = curr.parentElement;
+            if (!parent) break;
+            const sibs = Array.from(parent.children);
+            const idx = sibs.indexOf(curr);
+            if (idx > 0) {
+              for (let i = idx - 1; i >= 0; i--) {
+                const s = sibs[i];
+                const sTxt = (s.innerText || '').trim();
+                if (sTxt && sTxt !== 'or' && !sTxt.includes('Welcome back')) {
+                  targetCard = s;
+                  break;
+                }
+              }
+            }
+            if (targetCard) break;
+            curr = parent;
+          }
+        }
+      }
+
+      // 4. Fallback: item between "Welcome back" and "or"
+      if (!targetCard) {
+        const heading = allElements.find(el => (el.innerText || '').trim() === 'Welcome back');
+        const orDivider = allElements.find(el => (el.innerText || '').trim() === 'or');
+        if (heading && orDivider) {
+          const common = heading.closest('div');
+          if (common) {
+            const items = Array.from(common.querySelectorAll('div, button, a, li, [role="button"]')).filter(el => {
+              const rect = el.getBoundingClientRect();
+              const t = (el.innerText || '').trim();
+              return rect.width > 120 && rect.height > 30 && rect.height < 150 && t !== 'or' && !t.includes('Welcome back');
+            });
+            if (items.length > 0) targetCard = items[0];
+          }
+        }
+      }
+
+      if (targetCard) {
+        targetCard.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const rect = targetCard.getBoundingClientRect();
+
+        // Dispatch synthetic events
+        const opts = { bubbles: true, cancelable: true, view: window };
+        targetCard.dispatchEvent(new MouseEvent('mouseenter', opts));
+        targetCard.dispatchEvent(new MouseEvent('mousedown', opts));
+        targetCard.dispatchEvent(new MouseEvent('mouseup', opts));
+        targetCard.dispatchEvent(new MouseEvent('click', opts));
+        if (typeof targetCard.click === 'function') targetCard.click();
+
+        // Also trigger any child clickables
+        targetCard.querySelectorAll('button, a, [role="button"]').forEach(b => {
+          try { b.click(); } catch (_) {}
+        });
+
+        return {
+          found: true,
+          text: (targetCard.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+        };
+      }
+
+      return null;
+    })()
+  `;
+
+  try {
+    // 1. Try main frame
+    let res = await win.webContents.executeJavaScript(script).catch(() => null);
+
+    // 2. Try sub-frames if not found in main frame
+    if (!res?.found) {
+      for (const frame of win.webContents.mainFrame.frames) {
+        try {
+          res = await frame.executeJavaScript(script);
+          if (res?.found) break;
+        } catch (_) {}
+      }
+    }
+
+    if (res?.found) {
+      logger(`👉 Detected Epic "Welcome back" screen ("${res.text}"). Auto-confirming account...`);
+
+      // Native OS mouse click at coordinates
+      if (res.x > 0 && res.y > 0) {
+        try {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: res.x, y: res.y });
+          win.webContents.sendInputEvent({ type: 'mouseDown', x: res.x, y: res.y, button: 'left', clickCount: 1 });
+          win.webContents.sendInputEvent({ type: 'mouseUp', x: res.x, y: res.y, button: 'left', clickCount: 1 });
+        } catch (_) {}
+      }
+      return true;
+    }
+  } catch (_) {}
+
+  return false;
+}
+
+/**
  * Opens a native Electron BrowserWindow for Epic Games authentication.
  * 
  * Benefits over Playwright/Selenium:
@@ -671,13 +868,7 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
   const partitionName = `persist:epic_${targetId}`;
   const ses = session.fromPartition(partitionName);
 
-  // Remove "Electron/X.X" and "Claimr/X.X" from User-Agent so Google OAuth and Arkose Labs
-  // see a 100% genuine consumer Google Chrome / Chromium browser.
-  const rawUa = ses.getUserAgent();
-  const cleanUa = rawUa
-    .replace(/\s*Electron\/[0-9\.]+/g, '')
-    .replace(/\s*Claimr\/[0-9\.]+/g, '');
-  ses.setUserAgent(cleanUa);
+  configureSessionStealth(ses);
 
   // If registering a new account, clear old partition storage to start completely fresh
   if (isNew) {
@@ -708,6 +899,7 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
+        backgroundThrottling: false,
       },
     });
 
@@ -780,6 +972,18 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
         if (!hasAuth) return;
 
         const currentUrl = loginWin.webContents.getURL() || '';
+        const title = loginWin.getTitle() || '';
+
+        // Auto-click "Welcome back" card if present during sign in flow
+        const isWelcomeBack = currentUrl.includes('/id/login') ||
+                              currentUrl.includes('accounts.epicgames.com') ||
+                              title.includes('Confirm Your Account') ||
+                              title.includes('Welcome back');
+        if (isWelcomeBack) {
+          const clicked = await tryClickWelcomeBackAccount(loginWin, '', console.log);
+          if (clicked) return;
+        }
+
         // If the user is still on any login, account, or password page, they are still completing sign in.
         const isAuthFlow = currentUrl.includes('/id/login') ||
                            currentUrl.includes('/id/api') ||
@@ -870,6 +1074,10 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('library:updated');
           }
+
+          try {
+            await ses.cookies.flushStore();
+          } catch {}
 
           try {
             loginWin.close();
@@ -977,17 +1185,46 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
   const partitionName = `persist:epic_${targetId}`;
   const ses = session.fromPartition(partitionName);
 
-  // Clean User-Agent matching standard Chrome
-  const rawUa = ses.getUserAgent();
-  const cleanUa = rawUa
-    .replace(/\s*Electron\/[0-9\.]+/g, '')
-    .replace(/\s*Claimr\/[0-9\.]+/g, '');
-  ses.setUserAgent(cleanUa);
+  configureSessionStealth(ses);
+
+  // Hydrate session cookies from cookies.json if session cookies were purged
+  try {
+    const profileDir = account?.profileDir ? getFullProfileDir(account.profileDir, 'epic') : null;
+    const cookiesPath = profileDir ? path.join(profileDir, 'cookies.json') : null;
+    if (cookiesPath && fs.existsSync(cookiesPath)) {
+      const existingCookies = await ses.cookies.get({ domain: 'epicgames.com' });
+      const hasAuth = existingCookies.some(c => c.name === 'EPIC_BEARER_TOKEN' || c.name === 'EPIC_SSO' || c.name === 'EPIC_EG1');
+      if (!hasAuth) {
+        const raw = fs.readFileSync(cookiesPath, 'utf-8');
+        const diskCookies = JSON.parse(raw);
+        for (const c of diskCookies) {
+          const cookieDomain = c.domain ? (c.domain.startsWith('.') ? c.domain.slice(1) : c.domain) : 'epicgames.com';
+          const cookieUrl = `${c.secure ? 'https' : 'http'}://${cookieDomain}${c.path || '/'}`;
+          await ses.cookies.set({
+            url: cookieUrl,
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: !!c.secure,
+            httpOnly: !!c.httpOnly,
+            sameSite: c.sameSite === 'Strict' ? 'strict' : (c.sameSite === 'None' || c.sameSite === 'no_restriction' ? 'no_restriction' : 'lax'),
+            expirationDate: c.expires > 0 ? c.expires : (Math.floor(Date.now() / 1000) + 31536000),
+          }).catch(() => {});
+        }
+        await ses.cookies.flushStore().catch(() => {});
+        logger(`🔑 Restored session cookies for Epic account "${account?.username || account?.id}"`);
+      }
+    }
+  } catch (err) {
+    logger(`⚠️ Cookie hydration notice: ${err.message}`);
+  }
 
   return new Promise((resolve) => {
     let resolved = false;
     let pollInterval = null;
     let timeoutTimer = null;
+    let welcomeBackClickAttempts = 0;
 
     const claimWin = new BrowserWindow({
       width: 1280,
@@ -1002,6 +1239,7 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
+        backgroundThrottling: false,
       },
     });
 
@@ -1033,10 +1271,30 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
       }
     };
 
-    const finish = (result) => {
+    const finish = async (result) => {
       if (resolved) return;
       resolved = true;
       cleanup();
+      try {
+        if (result?.status === 'claimed') {
+          const profileDir = account?.profileDir ? getFullProfileDir(account.profileDir, 'epic') : null;
+          if (profileDir && fs.existsSync(profileDir)) {
+            const updatedCookies = await ses.cookies.get({});
+            const formatted = updatedCookies.map((c) => ({
+              name: c.name,
+              value: c.value,
+              domain: c.domain,
+              path: c.path,
+              expires: c.expirationDate ? Math.floor(c.expirationDate) : -1,
+              httpOnly: !!c.httpOnly,
+              secure: !!c.secure,
+              sameSite: c.sameSite === 'no_restriction' ? 'None' : (c.sameSite === 'strict' ? 'Strict' : 'Lax'),
+            }));
+            fs.writeFileSync(path.join(profileDir, 'cookies.json'), JSON.stringify(formatted, null, 2), 'utf-8');
+          }
+          await ses.cookies.flushStore().catch(() => {});
+        }
+      } catch (_) {}
       try {
         if (!claimWin.isDestroyed()) {
           claimWin.close();
@@ -1067,6 +1325,7 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
 
       try {
         const title = claimWin.getTitle() || '';
+        const currentUrl = claimWin.webContents.getURL() || '';
 
         // If Cloudflare or Turnstile interstitial appears, ensure window is visible
         if (title.includes('Just a moment') || title.includes('One more step')) {
@@ -1076,6 +1335,40 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
             logger('🛡️ Security verification required. Showing browser window...');
           }
           return;
+        }
+
+        // Check for Epic "Welcome back" / "Confirm Your Account" screen
+        const isWelcomeBack = title.includes('Confirm Your Account') ||
+                              title.includes('Welcome back') ||
+                              currentUrl.includes('/id/login') ||
+                              currentUrl.includes('accounts.epicgames.com');
+
+        if (isWelcomeBack) {
+          const clicked = await tryClickWelcomeBackAccount(claimWin, account?.username || '', logger);
+          if (clicked) {
+            welcomeBackClickAttempts++;
+            return;
+          }
+
+          // Check if 2FA code is explicitly requested
+          const needs2FA = await claimWin.webContents.executeJavaScript(`
+            (() => {
+              const body = (document.body ? document.body.innerText : '').toLowerCase();
+              const is2FA = body.includes('security code') || body.includes('two-factor') || body.includes('verification code');
+              const hasInput = !!document.querySelector('input[type="text"], input[type="tel"], input[name*="code"], input[name*="otp"]');
+              return is2FA && hasInput;
+            })()
+          `).catch(() => false);
+
+          if (needs2FA) {
+            if (!claimWin.isVisible()) {
+              claimWin.show();
+              claimWin.focus();
+            }
+            logger('🔐 Epic Games 2FA required. Please enter the verification code in the window...');
+            sendNotification('Claimr - 2FA Required', 'Please enter your Epic Games two-factor code to continue.');
+            return;
+          }
         }
 
         // Handle age verification / mature content dialogs

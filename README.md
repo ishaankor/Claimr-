@@ -22,9 +22,9 @@ Claimr is a standalone desktop application. No programming knowledge, terminal c
 
 | Platform | Download | Instructions |
 | :--- | :--- | :--- |
-| **macOS** (Apple Silicon & Intel) | [**Download Claimr.dmg**](https://github.com/ishaankoradia/claimr/releases/latest) | Open the `.dmg` and drag **Claimr** to your **Applications** folder. |
-| **Windows** | [**Download Claimr-Setup.exe**](https://github.com/ishaankoradia/claimr/releases/latest) | Run the installer and launch Claimr from the Start Menu. |
-| **Linux** | [**Download Claimr.AppImage**](https://github.com/ishaankoradia/claimr/releases/latest) | Make executable (`chmod +x`) and run. |
+| **macOS** (Apple Silicon & Intel) | [**Download Claimr.dmg**](https://github.com/ishaankor/Claimr-/releases) | Open the `.dmg` and drag **Claimr** to your **Applications** folder. |
+| **Windows** | [**Download Claimr-Setup.exe**](https://github.com/ishaankor/Claimr-/releases) | Run the installer and launch Claimr from the Start Menu. |
+| **Linux** | [**Download Claimr.AppImage**](https://github.com/ishaankor/Claimr-/releases) | Make executable (`chmod +x`) and run. |
 
 > **macOS Note**: Because Claimr is a community open-source app distributed outside the Mac App Store, macOS Gatekeeper may show a warning on first launch. If prompted, right-click **Claimr.app** in Applications and choose **Open**, or run:
 > ```bash
@@ -77,8 +77,8 @@ If you are a developer and wish to build or contribute to Claimr from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/ishaankoradia/claimr.git
-cd claimr
+git clone https://github.com/ishaankor/Claimr-.git
+cd Claimr-
 
 # Install dependencies
 npm install

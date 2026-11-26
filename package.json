@@ -3,7 +3,7 @@
   "productName": "Claimr",
   "description": "Automated free game claimer and manager for Epic Games and GOG",
   "type": "module",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "main": "electron/main.js",
   "scripts": {
     "app": "node scripts/start-app.js",

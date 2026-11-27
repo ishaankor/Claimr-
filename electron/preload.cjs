@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld('claimrAPI', {
   loginGog: () => ipcRenderer.invoke('store:login-gog'),
   claimAll: () => ipcRenderer.invoke('store:claim-all'),
   claimGame: (gameInfo) => ipcRenderer.invoke('store:claim-game', gameInfo),
+  stopClaim: () => ipcRenderer.invoke('store:stop-claim'),
+  onClaimStopped: (callback) => {
+    const subscription = () => callback();
+    ipcRenderer.on('claim:stopped', subscription);
+    return () => ipcRenderer.removeListener('claim:stopped', subscription);
+  },
   getHistory: () => ipcRenderer.invoke('store:get-history'),
   getAccounts: () => ipcRenderer.invoke('accounts:get'),
   swapAccount: (store, accountId) => ipcRenderer.invoke('accounts:swap', { store, accountId }),

@@ -879,6 +879,39 @@ input:checked + .slider:before {
   background: var(--accent-green);
 }
 
+.bottom-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-danger-stop {
+  background: rgba(239, 68, 68, 0.16);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  padding: 9px 15px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.btn-danger-stop:hover:not(:disabled) {
+  background: #ef4444;
+  color: #ffffff;
+  border-color: #ef4444;
+  transform: translateY(-1px);
+}
+
+.btn-danger-stop:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-primary-claim {
   background: #ffffff;
   color: #0d0f14;

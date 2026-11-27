@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const timerSeconds = document.getElementById('timerSeconds');
 
   const claimAllBtn = document.getElementById('claimAllBtn');
+  const stopClaimBtn = document.getElementById('stopClaimBtn');
   const refreshBtn = document.getElementById('refreshBtn');
 
   const terminalToggleBtn = document.getElementById('terminalToggleBtn');
@@ -577,11 +578,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (isAutomatorRunning) {
               openTerminal();
-              logToTerminal('⚠️ An automator task is already running. Please wait for it to complete.');
+              logToTerminal('⚠️ An automator task is already running. Click "Stop Automation" if you wish to cancel it.');
               return;
             }
 
-            isAutomatorRunning = true;
+            setAutomatorRunning(true);
             card.classList.add('claiming');
             openTerminal();
             logToTerminal('\n========================================');
@@ -600,7 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (err) {
               logToTerminal(`❌ Claiming failed: ${err.message}`);
             } finally {
-              isAutomatorRunning = false;
+              setAutomatorRunning(false);
               card.classList.remove('claiming');
               await renderGames();
             }
@@ -715,17 +716,52 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // -------------------------------------------------------------
-  // Claim All Action
+  // Claim All & Stop Automation Actions
   // -------------------------------------------------------------
+
+  function setAutomatorRunning(running) {
+    isAutomatorRunning = running;
+    if (stopClaimBtn) {
+      stopClaimBtn.style.display = running ? 'inline-flex' : 'none';
+      stopClaimBtn.disabled = false;
+    }
+  }
+
+  if (stopClaimBtn) {
+    stopClaimBtn.addEventListener('click', async () => {
+      if (!isAutomatorRunning) return;
+      stopClaimBtn.disabled = true;
+      openTerminal();
+      try {
+        if (window.claimrAPI.stopClaim) {
+          await window.claimrAPI.stopClaim();
+        }
+      } catch (err) {
+        logToTerminal(`❌ Stop error: ${err.message}`);
+      } finally {
+        setAutomatorRunning(false);
+        document.querySelectorAll('.game-card.claiming').forEach(c => c.classList.remove('claiming'));
+        await renderGames();
+      }
+    });
+  }
+
+  if (window.claimrAPI.onClaimStopped) {
+    window.claimrAPI.onClaimStopped(() => {
+      setAutomatorRunning(false);
+      document.querySelectorAll('.game-card.claiming').forEach(c => c.classList.remove('claiming'));
+      renderGames();
+    });
+  }
 
   claimAllBtn.addEventListener('click', async () => {
     if (isAutomatorRunning) {
       openTerminal();
-      logToTerminal('⚠️ An automator task is already running. Please wait for it to complete.');
+      logToTerminal('⚠️ An automator task is already running. Click "Stop Automation" if you wish to cancel it.');
       return;
     }
 
-    isAutomatorRunning = true;
+    setAutomatorRunning(true);
     claimAllBtn.disabled = true;
     claimAllBtn.classList.remove('all-claimed');
     claimAllBtn.innerHTML = `
@@ -743,7 +779,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       logToTerminal(`❌ Claiming failed: ${err.message}`);
     } finally {
-      isAutomatorRunning = false;
+      setAutomatorRunning(false);
       await renderGames();
     }
   });

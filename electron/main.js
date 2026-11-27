@@ -271,6 +271,9 @@ setCustomNotifier((title, message) => {
 let mainWindow = null;
 let tray = null;
 let isClaimingInProgress = false;
+let isClaimAbortRequested = false;
+let activeClaimWindow = null;
+let activeClaimFinish = null;
 
 function createWindow() {
   const iconPath = path.join(ROOT_DIR, 'assets', 'icon.png');
@@ -509,21 +512,21 @@ ipcMain.handle('store:check-auth', async (_event, opts = {}) => {
     console.warn('Epic auth check notice:', e.message);
   }
 
-  // GOG check
+  // GOG check (Native Electron Session - 0ms Chromium spawn overhead)
   try {
-    const gogContext = await launchGogBrowser({ headless: true });
-    const gogPage = gogContext.pages().length > 0 ? gogContext.pages()[0] : await gogContext.newPage();
-    await gogPage.goto('https://www.gog.com/userData.json', { waitUntil: 'domcontentloaded', timeout: 10000 });
-    const bodyText = await gogPage.innerText('body');
-    try {
-      const data = JSON.parse(bodyText);
-      if (data.isLoggedIn && data.username) {
-        gogUser = data.username;
-        const active = getActiveAccount('gog');
-        if (active) registerAccount('gog', { ...active, username: data.username });
+    const activeGog = getActiveAccount('gog');
+    if (activeGog) {
+      const ses = session.fromPartition(`persist:gog_${activeGog.id}`);
+      await hydrateGogSession(ses, activeGog);
+      const res = await ses.fetch('https://www.gog.com/userData.json');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.isLoggedIn && data.username) {
+          gogUser = data.username;
+          registerAccount('gog', { ...activeGog, username: data.username });
+        }
       }
-    } catch {}
-    await gogContext.close();
+    }
   } catch (e) {
     console.warn('GOG auth check notice:', e.message);
   }
@@ -557,7 +560,7 @@ ipcMain.handle('accounts:swap', async (_event, { store, accountId }) => {
       if (store === 'gog' && target) {
         const gogGiveaway = await getGogGiveawayFastOrBrowser().catch(() => null);
         if (gogGiveaway?.active && gogGiveaway?.title) {
-          const isOwned = await isGameInGogLibrary(gogGiveaway.title, { profileDir: target.profileDir });
+          const isOwned = await isGameInGogLibraryNative(gogGiveaway.title, target);
           if (isOwned) {
             const h = loadHistory();
             recordClaim(h, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', target.id, target.username);
@@ -589,7 +592,7 @@ ipcMain.handle('store:verify-real-library', async (_event, { store, accountId, t
     if (store === 'GOG' || store === 'gog') {
       const activeGog = accountId ? loadAccounts().gog.accounts.find(a => a.id === accountId) : getActiveAccount('gog');
       if (activeGog && title) {
-        const isOwned = await isGameInGogLibrary(title, { profileDir: activeGog.profileDir });
+        const isOwned = await isGameInGogLibraryNative(title, activeGog);
         if (isOwned) {
           recordClaim(history, { id: id || `gog_${title}`, title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -665,7 +668,7 @@ ipcMain.handle('store:sync-library', async () => {
     try {
       const gogGiveaway = await getGogGiveawayFastOrBrowser();
       if (gogGiveaway?.active && gogGiveaway?.title) {
-        const isOwned = gogGiveaway.isAlreadyClaimed || await isGameInGogLibrary(gogGiveaway.title, { profileDir: activeGog.profileDir });
+        const isOwned = gogGiveaway.isAlreadyClaimed || await isGameInGogLibraryNative(gogGiveaway.title, activeGog);
         if (isOwned) {
           recordClaim(history, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', activeGog.id, activeGog.username);
           results.gog.push(gogGiveaway.title);
@@ -697,12 +700,53 @@ let activeEpicLoginWindow = null;
 async function tryClickWelcomeBackAccount(win, targetUsername = '', logger = console.log) {
   if (!win || win.isDestroyed()) return false;
 
+  // Check if Epic displayed the "Something went wrong. Please refresh the page and check that you allow cookies" error
+  try {
+    const hasCookieError = await win.webContents.executeJavaScript(`
+      (() => {
+        const bodyText = (document.body ? document.body.innerText : '') || '';
+        return bodyText.includes('Something went wrong') && bodyText.includes('allow cookies');
+      })()
+    `).catch(() => false);
+
+    if (hasCookieError) {
+      const ses = win.webContents.session;
+      const cookies = await ses.cookies.get({});
+      for (const c of cookies) {
+        if (c.name === 'XSRF-TOKEN' || c.name === 'EPIC_CLIENT_SESSION' || c.name === '__cf_bm') {
+          const dom = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
+          const u = `${c.secure ? 'https' : 'http'}://${dom}${c.path || '/'}`;
+          await ses.cookies.remove(u, c.name).catch(() => {});
+        }
+      }
+      const alreadyReloaded = await win.webContents.executeJavaScript(`
+        (() => {
+          if (window.__claimrCookieErrReloaded) return true;
+          window.__claimrCookieErrReloaded = true;
+          return false;
+        })()
+      `).catch(() => false);
+
+      if (!alreadyReloaded) {
+        logger('🔄 Clearing stale CSRF cookie and refreshing Epic "Welcome back" page...');
+        win.webContents.reload();
+        return true;
+      }
+    }
+  } catch (_) {}
+
   const script = `
     (() => {
       const bodyText = (document.body ? document.body.innerText : '') || '';
       const docTitle = document.title || '';
       if (!bodyText.includes('Welcome back') && !docTitle.includes('Confirm Your Account')) {
         return null;
+      }
+
+      // Guard: Never click more than once per 12 seconds so we don't fire concurrent POST requests
+      // that invalidate Epic's rotating one-time CSRF/session cookie.
+      if (window.__claimrWelcomeClickedAt && Date.now() - window.__claimrWelcomeClickedAt < 12000) {
+        return { alreadyClicked: true };
       }
 
       const allElements = Array.from(document.querySelectorAll('*'));
@@ -783,21 +827,17 @@ async function tryClickWelcomeBackAccount(win, targetUsername = '', logger = con
       }
 
       if (targetCard) {
+        window.__claimrWelcomeClickedAt = Date.now();
         targetCard.scrollIntoView({ block: 'center', behavior: 'instant' });
-        const rect = targetCard.getBoundingClientRect();
+        const clickable = targetCard.matches('button, a, [role="button"]')
+          ? targetCard
+          : (targetCard.querySelector('button, a, [role="button"]') || targetCard);
+        const rect = clickable.getBoundingClientRect();
 
-        // Dispatch synthetic events
-        const opts = { bubbles: true, cancelable: true, view: window };
-        targetCard.dispatchEvent(new MouseEvent('mouseenter', opts));
-        targetCard.dispatchEvent(new MouseEvent('mousedown', opts));
-        targetCard.dispatchEvent(new MouseEvent('mouseup', opts));
-        targetCard.dispatchEvent(new MouseEvent('click', opts));
-        if (typeof targetCard.click === 'function') targetCard.click();
-
-        // Also trigger any child clickables
-        targetCard.querySelectorAll('button, a, [role="button"]').forEach(b => {
-          try { b.click(); } catch (_) {}
-        });
+        // Fire a SINGLE click on the clickable target (never fire multiple clicks or we break CSRF rotation)
+        if (typeof clickable.click === 'function') {
+          clickable.click();
+        }
 
         return {
           found: true,
@@ -816,26 +856,21 @@ async function tryClickWelcomeBackAccount(win, targetUsername = '', logger = con
     let res = await win.webContents.executeJavaScript(script).catch(() => null);
 
     // 2. Try sub-frames if not found in main frame
-    if (!res?.found) {
+    if (!res?.found && !res?.alreadyClicked) {
       for (const frame of win.webContents.mainFrame.frames) {
         try {
           res = await frame.executeJavaScript(script);
-          if (res?.found) break;
+          if (res?.found || res?.alreadyClicked) break;
         } catch (_) {}
       }
     }
 
+    if (res?.alreadyClicked) {
+      return true;
+    }
+
     if (res?.found) {
       logger(`👉 Detected Epic "Welcome back" screen ("${res.text}"). Auto-confirming account...`);
-
-      // Native OS mouse click at coordinates
-      if (res.x > 0 && res.y > 0) {
-        try {
-          win.webContents.sendInputEvent({ type: 'mouseMove', x: res.x, y: res.y });
-          win.webContents.sendInputEvent({ type: 'mouseDown', x: res.x, y: res.y, button: 'left', clickCount: 1 });
-          win.webContents.sendInputEvent({ type: 'mouseUp', x: res.x, y: res.y, button: 'left', clickCount: 1 });
-        } catch (_) {}
-      }
       return true;
     }
   } catch (_) {}
@@ -1112,7 +1147,8 @@ ipcMain.handle('accounts:add', async (_event, { store }) => {
     }
     return { ...res, accounts: loadAccounts() };
   } else {
-    const res = await loginNewGogAccount();
+    const { id, relPath, fullPath } = createNewProfileDir('gog');
+    const res = await openGogLoginWindow({ accountId: id, relPath, fullPath, isNew: true });
     if (res && res.success) {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('library:updated');
@@ -1140,33 +1176,409 @@ ipcMain.handle('store:login-epic', async () => {
   return await openEpicLoginWindow({ accountId, relPath, fullPath, isNew: !activeEpic });
 });
 
+let activeGogLoginWindow = null;
+
+async function hydrateGogSession(ses, account) {
+  configureSessionStealth(ses);
+  try {
+    await ses.cookies.set({
+      url: 'https://www.gog.com/',
+      name: 'CookieConsent',
+      value: '{stamp:%274oR8MJL+bxVlG6g+kl2we5+suMJ+Tv7I4C5d4k+YY4vrnhCD+P23RQ==%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true%2Cmethod:%27explicit%27%2Cver:1%2Cutc:1672331618201%2Cregion:%27de%27}',
+      domain: 'www.gog.com',
+      path: '/',
+      expirationDate: Math.floor(Date.now() / 1000) + 31536000,
+    }).catch(() => {});
+
+    const profileDir = account?.profileDir ? getFullProfileDir(account.profileDir, 'gog') : null;
+    const cookiesPath = profileDir ? path.join(profileDir, 'cookies.json') : null;
+    if (cookiesPath && fs.existsSync(cookiesPath)) {
+      const existingCookies = await ses.cookies.get({ domain: 'gog.com' });
+      const hasAuth = existingCookies.some(c => c.name === 'gog_us' || c.name === 'gog_lc' || c.name === 'login-token');
+      if (!hasAuth) {
+        const raw = fs.readFileSync(cookiesPath, 'utf-8');
+        const diskCookies = JSON.parse(raw);
+        for (const c of diskCookies) {
+          const cookieDomain = c.domain ? (c.domain.startsWith('.') ? c.domain.slice(1) : c.domain) : 'gog.com';
+          const cookieUrl = `${c.secure ? 'https' : 'http'}://${cookieDomain}${c.path || '/'}`;
+          await ses.cookies.set({
+            url: cookieUrl,
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: !!c.secure,
+            httpOnly: !!c.httpOnly,
+            sameSite: c.sameSite === 'Strict' ? 'strict' : (c.sameSite === 'None' || c.sameSite === 'no_restriction' ? 'no_restriction' : 'lax'),
+            expirationDate: c.expires > 0 ? c.expires : (Math.floor(Date.now() / 1000) + 31536000),
+          }).catch(() => {});
+        }
+        await ses.cookies.flushStore().catch(() => {});
+      }
+    }
+  } catch (_) {}
+  return ses;
+}
+
+async function isGameInGogLibraryNative(gameTitle, account) {
+  if (!gameTitle) return false;
+  try {
+    const targetId = account?.id || 'default';
+    const ses = session.fromPartition(`persist:gog_${targetId}`);
+    await hydrateGogSession(ses, account);
+    const url = `https://www.gog.com/account/getFilteredProducts?mediaType=1&search=${encodeURIComponent(gameTitle)}`;
+    const res = await ses.fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.totalProducts > 0 && Array.isArray(data.products)) {
+        const cleanTarget = gameTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return data.products.some(p => {
+          const cleanTitle = (p.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          const cleanSlug = (p.slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          return cleanTitle === cleanTarget || cleanSlug === cleanTarget;
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('GOG native library check error:', err.message);
+  }
+  return false;
+}
+
+/**
+ * Opens a native Electron BrowserWindow for GOG.com authentication.
+ * Avoids Playwright CDP debugging pipes so Cloudflare Turnstile passes cleanly.
+ */
+async function openGogLoginWindow({ accountId, relPath, fullPath, isNew = false } = {}) {
+  if (activeGogLoginWindow && !activeGogLoginWindow.isDestroyed()) {
+    activeGogLoginWindow.show();
+    activeGogLoginWindow.focus();
+    return { success: false, error: 'GOG login window is already active' };
+  }
+
+  const targetId = accountId || 'default';
+  const targetRelPath = relPath || (targetId === 'default' ? '.profile-gog' : path.join('.profiles', 'gog', targetId));
+  const targetFullPath = fullPath || getFullProfileDir(targetRelPath, 'gog');
+  fs.mkdirSync(targetFullPath, { recursive: true });
+
+  const partitionName = `persist:gog_${targetId}`;
+  const ses = session.fromPartition(partitionName);
+
+  configureSessionStealth(ses);
+
+  if (isNew) {
+    try {
+      await ses.clearStorageData({
+        storages: ['cookies', 'localstorage', 'sessionstorage', 'cache'],
+      });
+    } catch {}
+  } else {
+    await hydrateGogSession(ses, { id: targetId, profileDir: targetRelPath });
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    let pollTimer = null;
+    let timeoutTimer = null;
+
+    const loginWin = new BrowserWindow({
+      width: 540,
+      height: 740,
+      minWidth: 440,
+      minHeight: 600,
+      title: 'Sign In to GOG.com',
+      parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : null,
+      modal: false,
+      show: false,
+      autoHideMenuBar: true,
+      webPreferences: {
+        partition: partitionName,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        backgroundThrottling: false,
+      },
+    });
+
+    activeGogLoginWindow = loginWin;
+
+    // Handle OAuth popups (Google, Steam, Discord, Xbox)
+    loginWin.webContents.setWindowOpenHandler(() => {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 680,
+          autoHideMenuBar: true,
+          webPreferences: {
+            partition: partitionName,
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            backgroundThrottling: false,
+          },
+        },
+      };
+    });
+
+    const cleanup = () => {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+      activeGogLoginWindow = null;
+    };
+
+    loginWin.once('ready-to-show', () => {
+      loginWin.show();
+      loginWin.focus();
+    });
+
+    loginWin.on('closed', () => {
+      cleanup();
+      if (!resolved) {
+        resolved = true;
+        resolve({ success: false, error: 'GOG login window was closed before completing sign in.' });
+      }
+    });
+
+    timeoutTimer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        try { loginWin.close(); } catch {}
+        resolve({ success: false, error: 'GOG sign in timed out after 5 minutes.' });
+      }
+    }, 300000);
+
+    const checkLoginStatus = async () => {
+      if (resolved || loginWin.isDestroyed()) return;
+
+      try {
+        const currentUrl = loginWin.webContents.getURL() || '';
+        const isLoginFlow = currentUrl.includes('login.gog.com') || currentUrl.includes('/auth?');
+        if (isLoginFlow) return;
+
+        const res = await ses.fetch('https://www.gog.com/userData.json');
+        if (!res.ok) return;
+
+        const data = await res.json().catch(() => null);
+        if (data && data.isLoggedIn && data.username) {
+          resolved = true;
+          cleanup();
+
+          const username = data.username.trim();
+          console.log(`✅ GOG.com authentication confirmed for: ${username}`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('claim:log', `✅ GOG.com authentication confirmed for: ${username}`);
+          }
+
+          const cookies = await ses.cookies.get({});
+          const formattedCookies = cookies.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            expires: c.expirationDate ? Math.floor(c.expirationDate) : -1,
+            httpOnly: !!c.httpOnly,
+            secure: !!c.secure,
+            sameSite: c.sameSite === 'no_restriction' ? 'None' : (c.sameSite === 'strict' ? 'Strict' : 'Lax'),
+          }));
+
+          fs.writeFileSync(
+            path.join(targetFullPath, 'cookies.json'),
+            JSON.stringify(formattedCookies, null, 2),
+            'utf-8'
+          );
+
+          const registered = registerAccount('gog', {
+            id: targetId,
+            username,
+            profileDir: targetRelPath,
+          });
+
+          try {
+            const gogGiveaway = await getGogGiveawayFastOrBrowser().catch(() => null);
+            if (gogGiveaway?.active && gogGiveaway?.title) {
+              const isOwned = await isGameInGogLibraryNative(gogGiveaway.title, registered);
+              if (isOwned) {
+                const h = loadHistory();
+                recordClaim(h, { id: `gog_${gogGiveaway.title}`, title: gogGiveaway.title, slug: 'gog' }, 'in_library', registered.id, registered.username);
+              }
+            }
+          } catch (_) {}
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('library:updated');
+          }
+
+          try {
+            await ses.cookies.flushStore();
+          } catch {}
+
+          try {
+            loginWin.close();
+          } catch {}
+
+          showFloatingNotification('Account Connected', `Signed in to GOG.com as ${username}`);
+          resolve({ success: true, account: registered, username });
+        }
+      } catch (_) {}
+    };
+
+    pollTimer = setInterval(checkLoginStatus, 1500);
+
+    const gogLoginUrl = 'https://login.gog.com/auth?client_id=46755278331571209&layout=default&brand=gog&response_type=code&redirect_uri=https%3A%2F%2Fwww.gog.com%2Fon_login_success%3FreturnTo%3D%2Fen';
+    loginWin.loadURL(gogLoginUrl).catch((err) => {
+      console.warn('GOG login window load URL warning:', err.message);
+    });
+  });
+}
+
+/**
+ * Claims current active GOG giveaway using native Electron session & BrowserWindow.
+ */
+async function claimGogNative(account, { headless = true, logger = console.log } = {}) {
+  logger('\n========================================');
+  logger('🎮 [GOG.COM] Checking for Giveaways...');
+
+  const targetId = account?.id || 'default';
+  const ses = session.fromPartition(`persist:gog_${targetId}`);
+  await hydrateGogSession(ses, account);
+
+  const giveaway = await getGogGiveawayFastOrBrowser().catch(() => ({ active: false }));
+  if (!giveaway?.active) {
+    logger('ℹ️ No active time-limited giveaway on GOG right now.');
+    return { status: 'no_giveaway' };
+  }
+
+  logger(`🎁 Active GOG Giveaway detected: "${giveaway.title}"`);
+
+  const alreadyOwned = giveaway.isAlreadyClaimed || await isGameInGogLibraryNative(giveaway.title, account);
+  if (alreadyOwned) {
+    logger(`✅ "${giveaway.title}" is already in your GOG library!`);
+    const history = loadHistory();
+    recordClaim(history, { id: `gog_${giveaway.title}`, title: giveaway.title, slug: 'gog' }, 'in_library', targetId, account?.username);
+    return { status: 'already_claimed', title: giveaway.title };
+  }
+
+  // Verify GOG authentication
+  let gogUsername = null;
+  try {
+    const userRes = await ses.fetch('https://www.gog.com/userData.json');
+    if (userRes.ok) {
+      const userData = await userRes.json();
+      if (userData && userData.isLoggedIn && userData.username) {
+        gogUsername = userData.username;
+      }
+    }
+  } catch (_) {}
+
+  if (!gogUsername) {
+    logger('⚠️ Found GOG giveaway, but you are not signed into GOG.');
+    logger('👉 Click "Connect" next to GOG to sign into your GOG account.');
+    return { status: 'unauthorized', title: giveaway.title };
+  }
+
+  logger(`👤 Signed into GOG as: ${gogUsername}`);
+  logger('👉 Claiming GOG giveaway...');
+
+  try {
+    let claimRes = await ses.fetch('https://www.gog.com/giveaway/claim', {
+      method: 'GET',
+      headers: {
+        Referer: 'https://www.gog.com/en',
+      },
+    });
+    if (!claimRes.ok && claimRes.status === 405) {
+      claimRes = await ses.fetch('https://www.gog.com/giveaway/claim', {
+        method: 'POST',
+        headers: {
+          Referer: 'https://www.gog.com/en',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      });
+    }
+    const bodyText = (await claimRes.text()).trim();
+    let resultJson = {};
+    try {
+      resultJson = JSON.parse(bodyText);
+    } catch {}
+
+    const history = loadHistory();
+    if (claimRes.ok && (bodyText === '{}' || bodyText === '')) {
+      logger(`🎉 SUCCESS: Successfully claimed "${giveaway.title}" on GOG!`);
+      recordClaim(history, { id: `gog_${giveaway.title}`, title: giveaway.title, slug: 'gog' }, 'claimed', targetId, gogUsername);
+      sendNotification('GOG Freebie Claimed! 🎁', `Successfully claimed "${giveaway.title}" on GOG!`);
+      return { status: 'claimed', title: giveaway.title };
+    } else if (resultJson.message === 'Already claimed') {
+      logger(`✅ "${giveaway.title}" is already in your GOG library!`);
+      recordClaim(history, { id: `gog_${giveaway.title}`, title: giveaway.title, slug: 'gog' }, 'in_library', targetId, gogUsername);
+      return { status: 'already_claimed', title: giveaway.title };
+    } else if (resultJson.message === 'Unauthorized') {
+      logger('❌ GOG reported Unauthorized. Please re-authenticate.');
+      return { status: 'unauthorized', title: giveaway.title };
+    } else {
+      logger(`ℹ️ GOG claim response: ${bodyText}`);
+      return { status: 'response', message: bodyText, title: giveaway.title };
+    }
+  } catch (err) {
+    logger(`❌ GOG claim error: ${err.message}`);
+    return { status: 'error', error: err.message };
+  }
+}
+
 ipcMain.handle('store:login-gog', async () => {
   console.log('🔑 Opening GOG login window...');
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('claim:log', '🔑 Opening browser for GOG login...');
+    mainWindow.webContents.send('claim:log', '🔑 Opening GOG.com login window...');
   }
-  try {
-    const res = await loginGog();
-    if (res && res.success) {
-      const active = getActiveAccount('gog');
-      if (active) {
-        registerAccount('gog', { ...active, username: res.username });
-      } else {
-        registerAccount('gog', { id: 'default', username: res.username, profileDir: '.profile-gog' });
-      }
-    }
-    return res;
-  } catch (err) {
-    console.error('GOG login error:', err);
-    return { success: false, error: err.message };
-  }
+  const activeGog = getActiveAccount('gog');
+  const accountId = activeGog ? activeGog.id : 'default';
+  const relPath = activeGog?.profileDir || (accountId === 'default' ? '.profile-gog' : path.join('.profiles', 'gog', accountId));
+  const fullPath = getFullProfileDir(relPath, 'gog');
+  return await openGogLoginWindow({ accountId, relPath, fullPath, isNew: !activeGog });
 });
 
 ipcMain.handle('store:claim-all', async () => {
   if (isClaimingInProgress) {
     return { error: 'Claiming process is already running.' };
   }
+  isClaimAbortRequested = false;
   await executeAutoClaimInBackground();
+  return { success: true };
+});
+
+ipcMain.handle('store:stop-claim', async () => {
+  isClaimAbortRequested = true;
+  const sendLog = (msg) => {
+    console.log(`[Claim Engine] ${msg}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('claim:log', msg);
+    }
+  };
+
+  sendLog('🛑 Stopping active automation...');
+
+  if (activeClaimFinish) {
+    try {
+      await activeClaimFinish({ status: 'cancelled', message: 'Automation stopped by user.' });
+    } catch (_) {}
+  } else if (activeClaimWindow && !activeClaimWindow.isDestroyed()) {
+    try {
+      activeClaimWindow.destroy();
+    } catch (_) {}
+    activeClaimWindow = null;
+  }
+
+  isClaimingInProgress = false;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('claim:stopped');
+  }
   return { success: true };
 });
 
@@ -1187,8 +1599,24 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
 
   configureSessionStealth(ses);
 
-  // Hydrate session cookies from cookies.json if session cookies were purged
+  // Hydrate session cookies from cookies.json if session cookies were purged,
+  // while stripping stale/poisoned CSRF or ephemeral flow cookies
   try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const allExisting = await ses.cookies.get({});
+    for (const ec of allExisting) {
+      if (
+        ec.name === 'XSRF-TOKEN' ||
+        ec.name === 'EPIC_CLIENT_SESSION' ||
+        ec.name === '__cf_bm' ||
+        (ec.expirationDate && ec.expirationDate < nowSec)
+      ) {
+        const dom = ec.domain.startsWith('.') ? ec.domain.slice(1) : ec.domain;
+        const u = `${ec.secure ? 'https' : 'http'}://${dom}${ec.path || '/'}`;
+        await ses.cookies.remove(u, ec.name).catch(() => {});
+      }
+    }
+
     const profileDir = account?.profileDir ? getFullProfileDir(account.profileDir, 'epic') : null;
     const cookiesPath = profileDir ? path.join(profileDir, 'cookies.json') : null;
     if (cookiesPath && fs.existsSync(cookiesPath)) {
@@ -1197,20 +1625,28 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
       if (!hasAuth) {
         const raw = fs.readFileSync(cookiesPath, 'utf-8');
         const diskCookies = JSON.parse(raw);
+        const skipNames = new Set(['XSRF-TOKEN', 'EPIC_CLIENT_SESSION', '__cf_bm', '_cfuvid']);
         for (const c of diskCookies) {
-          const cookieDomain = c.domain ? (c.domain.startsWith('.') ? c.domain.slice(1) : c.domain) : 'epicgames.com';
+          if (!c.name || skipNames.has(c.name)) continue;
+          if (c.expires && c.expires > 0 && c.expires < nowSec) continue;
+
+          const isDomainCookie = c.domain && c.domain.startsWith('.');
+          const cookieDomain = c.domain ? (isDomainCookie ? c.domain.slice(1) : c.domain) : 'epicgames.com';
           const cookieUrl = `${c.secure ? 'https' : 'http'}://${cookieDomain}${c.path || '/'}`;
-          await ses.cookies.set({
+          const cookieDetails = {
             url: cookieUrl,
             name: c.name,
             value: c.value,
-            domain: c.domain,
             path: c.path || '/',
             secure: !!c.secure,
             httpOnly: !!c.httpOnly,
             sameSite: c.sameSite === 'Strict' ? 'strict' : (c.sameSite === 'None' || c.sameSite === 'no_restriction' ? 'no_restriction' : 'lax'),
-            expirationDate: c.expires > 0 ? c.expires : (Math.floor(Date.now() / 1000) + 31536000),
-          }).catch(() => {});
+            expirationDate: c.expires > 0 ? c.expires : (nowSec + 31536000),
+          };
+          if (isDomainCookie) {
+            cookieDetails.domain = c.domain;
+          }
+          await ses.cookies.set(cookieDetails).catch(() => {});
         }
         await ses.cookies.flushStore().catch(() => {});
         logger(`🔑 Restored session cookies for Epic account "${account?.username || account?.id}"`);
@@ -1269,6 +1705,8 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
         clearTimeout(timeoutTimer);
         timeoutTimer = null;
       }
+      if (activeClaimWindow === claimWin) activeClaimWindow = null;
+      if (activeClaimFinish === finish) activeClaimFinish = null;
     };
 
     const finish = async (result) => {
@@ -1303,6 +1741,9 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
       resolve(result);
     };
 
+    activeClaimWindow = claimWin;
+    activeClaimFinish = finish;
+
     claimWin.on('closed', () => {
       cleanup();
       if (!resolved) {
@@ -1311,14 +1752,114 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
       }
     });
 
-    // 2-minute safety timeout
+    // 3-minute safety timeout (allows ample time if user needs to complete a security check)
     timeoutTimer = setTimeout(() => {
-      finish({ status: 'failed', error: 'Claim process timed out after 2 minutes.' });
-    }, 120000);
+      finish({ status: 'failed', error: 'Claim process timed out after 3 minutes.' });
+    }, 180000);
 
     let stage = 'loading'; // 'loading' | 'clicked_get' | 'checkout'
     let getClickedAt = 0;
     let placeOrderAttempts = 0;
+    let lastPlaceOrderClickAt = 0;
+    let captchaActive = false;
+    let captchaNotified = false;
+    let captchaResolvedAt = 0;
+    let postCaptchaClicked = false;
+
+    const getAllFrames = () => {
+      try {
+        const main = claimWin.webContents.mainFrame;
+        if (Array.isArray(main.framesInSubtree) && main.framesInSubtree.length > 0) {
+          return main.framesInSubtree;
+        }
+        const collected = [main];
+        const visit = (f) => {
+          if (!f || !Array.isArray(f.frames)) return;
+          for (const child of f.frames) {
+            collected.push(child);
+            visit(child);
+          }
+        };
+        visit(main);
+        return collected;
+      } catch (_) {
+        return [claimWin.webContents.mainFrame];
+      }
+    };
+
+    const detectActiveCaptcha = async () => {
+      // A checkout captcha challenge only triggers AFTER "Place Order" has been clicked at least once.
+      // Before clicking "Place Order", any arkose/hcaptcha/turnstile iframes in the checkout DOM are
+      // invisible preloaded background token frames.
+      if (placeOrderAttempts === 0) return false;
+      if (Date.now() - lastPlaceOrderClickAt < 1500) return false;
+
+      const allFrames = getAllFrames();
+      for (const frame of allFrames) {
+        try {
+          const hasVisibleCaptcha = await frame.executeJavaScript(`
+            (() => {
+              const isElementTrulyVisible = (el) => {
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                // Interactive challenge modals/widgets are at least 200x60 inside the viewport
+                if (rect.width < 200 || rect.height < 60) return false;
+                if (rect.bottom <= 0 || rect.right <= 0) return false;
+                if (rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+
+                let curr = el;
+                while (curr && curr !== document.documentElement) {
+                  const style = window.getComputedStyle(curr);
+                  if (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    parseFloat(style.opacity || '1') <= 0.1
+                  ) {
+                    return false;
+                  }
+                  curr = curr.parentElement;
+                }
+                return true;
+              };
+
+              const selectors = [
+                'iframe[src*="hcaptcha.html#frame=challenge"]',
+                'iframe[src*="arkose"]',
+                'iframe[src*="funcaptcha"]',
+                'iframe[src*="octocaptcha"]',
+                'iframe[src*="challenges.cloudflare.com"]',
+                'iframe[src*="turnstile"]',
+                'iframe[title*="challenge" i]',
+                'div#challenge-stage'
+              ];
+              for (const sel of selectors) {
+                const els = Array.from(document.querySelectorAll(sel));
+                for (const el of els) {
+                  if (isElementTrulyVisible(el)) {
+                    return true;
+                  }
+                }
+              }
+
+              if (window.innerWidth >= 200 && window.innerHeight >= 60 && document.body) {
+                const bodyText = document.body.innerText || '';
+                if (
+                  bodyText.includes('Verify you are human') ||
+                  bodyText.includes('complete a security check') ||
+                  bodyText.includes('Please solve this puzzle')
+                ) {
+                  return true;
+                }
+              }
+              return false;
+            })()
+          `).catch(() => false);
+
+          if (hasVisibleCaptcha) return true;
+        } catch (_) {}
+      }
+      return false;
+    };
 
     const checkStep = async () => {
       if (resolved || claimWin.isDestroyed()) return;
@@ -1371,19 +1912,19 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
           }
         }
 
-        // Handle age verification / mature content dialogs
-        await claimWin.webContents.executeJavaScript(`
-          (() => {
-            const btn = Array.from(document.querySelectorAll('button')).find(b => {
-              const t = (b.innerText || '').trim();
-              return ['Continue', 'CONTINUE', 'Accept', 'ACCEPT', 'Yes', 'YES', 'Yes, buy now', 'I Understand', 'Dismiss', 'OK'].includes(t);
-            });
-            if (btn) btn.click();
-          })()
-        `).catch(() => {});
-
         // Stage 1: Store page loading & button check
         if (stage === 'loading') {
+          // Handle age verification / mature content dialogs on the store page
+          await claimWin.webContents.executeJavaScript(`
+            (() => {
+              const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = (b.innerText || '').trim();
+                return ['Continue', 'CONTINUE', 'Accept', 'ACCEPT', 'Yes', 'YES', 'Yes, buy now', 'I Understand', 'Dismiss', 'OK'].includes(t);
+              });
+              if (btn) btn.click();
+            })()
+          `).catch(() => {});
+
           const pageState = await claimWin.webContents.executeJavaScript(`
             (() => {
               const buttons = Array.from(document.querySelectorAll('button'));
@@ -1430,113 +1971,40 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
         if (stage === 'clicked_get' || stage === 'checkout') {
           stage = 'checkout';
 
-          // 1. Check order confirmation in main document
-          const isConfirmed = await claimWin.webContents.executeJavaScript(`
-            (() => {
-              const body = document.body ? document.body.innerText : '';
-              if (
-                body.includes('Thank you for buying') ||
-                body.includes('Thanks for your order') ||
-                body.includes('Thank you!') ||
-                body.includes('Order Confirmed')
-              ) {
-                return true;
-              }
-
-              // Check if "Is Epic Games Launcher installed?" post-purchase modal appeared
-              const launcherPrompt = Array.from(document.querySelectorAll('div, h1, h2, h3, p')).find(el => {
-                return (el.innerText || '').includes('Is Epic Games Launcher installed?');
-              });
-              if (launcherPrompt) return true;
-
-              return false;
-            })()
-          `).catch(() => false);
-
-          if (isConfirmed) {
-            logger(`🎉 Order Confirmed! Successfully claimed "${game.title}".`);
-            const history = loadHistory();
-            recordClaim(history, game, 'claimed', account?.id, account?.username);
-            sendNotification('Game Claimed! 🎮', `"${game.title}" has been successfully claimed on Epic Games Store!`);
-            return finish({ status: 'claimed' });
-          }
-
-          // 2. Accept EULA or consent checkboxes if present
-          await claimWin.webContents.executeJavaScript(`
-            (() => {
-              const eula = document.querySelector('input#agree, input#eula, input[name="agree"]');
-              if (eula && !eula.checked) eula.click();
-              const acceptBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                const t = (b.innerText || '').trim().toLowerCase();
-                return t === 'i accept' || t === 'i agree' || t === 'accept';
-              });
-              if (acceptBtn) acceptBtn.click();
-            })()
-          `).catch(() => {});
-
-          // 3. Scan main document for Place Order button
-          const mainClick = await claimWin.webContents.executeJavaScript(`
-            (() => {
-              const placeBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                if (b.getAttribute('data-testid') === 'purchase-cta-button') return false;
-                const txt = (b.innerText || '').toLowerCase().trim();
-                return txt === 'place order' || txt === 'add to library' || b.classList.contains('payment-btn--primary') || b.classList.contains('payment-order-confirm__btn');
-              });
-              if (placeBtn) {
-                placeBtn.click();
-                return true;
-              }
-              return false;
-            })()
-          `).catch(() => false);
-
-          if (mainClick) {
-            placeOrderAttempts++;
-            logger(`👉 Clicked "Place Order" button in checkout (attempt ${placeOrderAttempts})...`);
-          }
-
-          // 4. Scan checkout iframes
-          for (const frame of claimWin.webContents.mainFrame.frames) {
+          // 1. Check order confirmation across main document and all checkout iframes
+          const allFrames = getAllFrames();
+          for (const frame of allFrames) {
             try {
-              const frameResult = await frame.executeJavaScript(`
+              const isConfirmed = await frame.executeJavaScript(`
                 (() => {
                   const body = document.body ? document.body.innerText : '';
-                  if (body.includes('Thank you for buying') || body.includes('Thanks for your order') || body.includes('Order Confirmed')) {
-                    return 'confirmed';
+                  if (
+                    body.includes('Thank you for buying') ||
+                    body.includes('Thanks for your order') ||
+                    body.includes('Thank you!') ||
+                    body.includes('Order Confirmed')
+                  ) {
+                    return true;
                   }
-
-                  const eula = document.querySelector('input#agree, input#eula, input[name="agree"]');
-                  if (eula && !eula.checked) eula.click();
-
-                  const placeBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                    const txt = (b.innerText || '').toLowerCase().trim();
-                    return txt === 'place order' || txt === 'add to library' || b.classList.contains('payment-btn--primary') || b.classList.contains('payment-order-confirm__btn');
+                  const launcherPrompt = Array.from(document.querySelectorAll('div, h1, h2, h3, p')).find(el => {
+                    return (el.innerText || '').includes('Is Epic Games Launcher installed?');
                   });
-                  if (placeBtn) {
-                    placeBtn.click();
-                    return 'clicked';
-                  }
-                  return null;
+                  return !!launcherPrompt;
                 })()
-              `);
+              `).catch(() => false);
 
-              if (frameResult === 'confirmed') {
-                logger(`🎉 Order Confirmed in iframe! Successfully claimed "${game.title}".`);
+              if (isConfirmed) {
+                logger(`🎉 Order Confirmed! Successfully claimed "${game.title}".`);
                 const history = loadHistory();
                 recordClaim(history, game, 'claimed', account?.id, account?.username);
                 sendNotification('Game Claimed! 🎮', `"${game.title}" has been successfully claimed on Epic Games Store!`);
                 return finish({ status: 'claimed' });
               }
-
-              if (frameResult === 'clicked') {
-                placeOrderAttempts++;
-                logger(`👉 Clicked "Place Order" in checkout iframe (attempt ${placeOrderAttempts})...`);
-              }
             } catch (_) {}
           }
 
-          // 5. If 15+ seconds have elapsed since clicking Get, verify if the game is now "In Library"
-          if (placeOrderAttempts > 0 && Date.now() - getClickedAt > 15000) {
+          // 2. If 12+ seconds have elapsed since clicking Place Order, check if store page now shows "In Library"
+          if (placeOrderAttempts > 0 && Date.now() - (lastPlaceOrderClickAt || getClickedAt) > 12000) {
             const isNowOwned = await claimWin.webContents.executeJavaScript(`
               (() => {
                 const buttons = Array.from(document.querySelectorAll('button'));
@@ -1556,18 +2024,118 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
             }
           }
 
-          // 6. Check for Captcha in window
-          const hasCaptcha = await claimWin.webContents.executeJavaScript(`
-            (() => {
-              return !!document.querySelector('iframe[src*="challenge"], iframe[src*="arkose"], iframe[src*="hcaptcha"], div#challenge-stage');
-            })()
-          `).catch(() => false);
+          // 3. Check for Captcha / Cloudflare / Arkose verification BEFORE touching any checkout buttons!
+          // Clicking "Place Order" while a captcha is loading or active forces Epic to regenerate a new captcha.
+          const hasCaptcha = await detectActiveCaptcha();
+          if (hasCaptcha) {
+            captchaActive = true;
+            captchaResolvedAt = 0;
+            if (!claimWin.isVisible()) {
+              claimWin.show();
+              claimWin.focus();
+            }
+            if (!captchaNotified) {
+              captchaNotified = true;
+              logger('🛡️ Security verification required in checkout. Auto-clicker paused — please complete verification in the window...');
+              sendNotification('Claimr - Verification Required 🛡️', 'Epic Games requires verification to complete your order.');
+            }
+            return;
+          }
 
-          if (hasCaptcha && !claimWin.isVisible()) {
-            claimWin.show();
-            claimWin.focus();
-            logger('🛡️ Security verification required. Please complete it in the window...');
-            sendNotification('Claimr - Verification Required 🛡️', 'Epic Games requires verification to complete order.');
+          if (captchaActive) {
+            captchaActive = false;
+            captchaResolvedAt = Date.now();
+            logger('✅ Security verification completed! Waiting for order confirmation...');
+          }
+
+          // 4. Accept "Device not supported", EULA, or consent dialogs if present in main document or checkout iframes
+          let eulaJustClicked = false;
+          for (const frame of allFrames) {
+            try {
+              const dialogRes = await frame.executeJavaScript(`
+                (() => {
+                  let acted = null;
+                  const eula = document.querySelector('input#agree, input#eula, input[name="agree"]');
+                  if (eula && !eula.checked) {
+                    eula.click();
+                    acted = 'checkbox';
+                  }
+                  const acceptBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
+                    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    if (!['continue', 'i accept', 'i agree', 'accept', 'yes, buy now', 'i understand'].includes(t)) {
+                      return false;
+                    }
+                    const rect = b.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0 && !b.disabled;
+                  });
+                  if (acceptBtn) {
+                    const label = (acceptBtn.innerText || acceptBtn.textContent || '').trim();
+                    acceptBtn.click();
+                    acted = label || 'button';
+                  }
+                  return acted;
+                })()
+              `).catch(() => null);
+              if (dialogRes) {
+                eulaJustClicked = true;
+                logger(`👉 Confirmed store dialog ("${dialogRes}")...`);
+              }
+            } catch (_) {}
+          }
+
+          // 5. Click "Place Order" ONCE (never spam-click it on every poll tick!)
+          // Only allow a second click if a captcha was solved 8+ seconds ago and Epic didn't auto-submit,
+          // or if an EULA modal was just accepted after the initial click.
+          const canClickInitial = placeOrderAttempts === 0;
+          const canClickPostCaptcha =
+            placeOrderAttempts === 1 &&
+            !postCaptchaClicked &&
+            captchaResolvedAt > 0 &&
+            Date.now() - captchaResolvedAt > 8000;
+          const canClickPostEula =
+            placeOrderAttempts === 1 &&
+            eulaJustClicked &&
+            Date.now() - lastPlaceOrderClickAt > 3000;
+
+          if (canClickInitial || canClickPostCaptcha || canClickPostEula) {
+            for (const frame of allFrames) {
+              try {
+                const clickedPlaceOrder = await frame.executeJavaScript(`
+                  (() => {
+                    const placeBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                      if (b.getAttribute('data-testid') === 'purchase-cta-button') return false;
+                      const txt = (b.innerText || '').toLowerCase().trim();
+                      const isMatch =
+                        txt === 'place order' ||
+                        txt === 'add to library' ||
+                        b.classList.contains('payment-btn--primary') ||
+                        b.classList.contains('payment-order-confirm__btn');
+                      if (!isMatch) return false;
+                      const cls = (b.className || '').toLowerCase();
+                      const isDisabled =
+                        b.disabled ||
+                        b.getAttribute('aria-disabled') === 'true' ||
+                        cls.includes('disabled') ||
+                        cls.includes('loading');
+                      return !isDisabled;
+                    });
+                    if (placeBtn) {
+                      placeBtn.click();
+                      return true;
+                    }
+                    return false;
+                  })()
+                `).catch(() => false);
+
+                if (clickedPlaceOrder) {
+                  placeOrderAttempts++;
+                  lastPlaceOrderClickAt = Date.now();
+                  if (canClickPostCaptcha) postCaptchaClicked = true;
+                  logger(`👉 Clicked "Place Order" in checkout. Waiting for confirmation...`);
+                  break;
+                }
+              } catch (_) {}
+            }
           }
         }
       } catch (err) {
@@ -1594,6 +2162,7 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
   }
 
   isClaimingInProgress = true;
+  isClaimAbortRequested = false;
   const sendLog = (msg) => {
     console.log(`[Claim Engine] ${msg}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1638,14 +2207,14 @@ ipcMain.handle('store:claim-game', async (_event, { store, gameId, gameTitle, st
       const activeGog = getActiveAccount('gog');
       sendLog(`👤 Active GOG Profile: ${activeGog?.username || 'Default'} (${activeGog?.id || 'default'})`);
 
-      const result = await claimGog({
+      const result = await claimGogNative(activeGog, {
         headless: isHeadless,
         logger: sendLog,
-        accountId: activeGog?.id || 'default',
-        username: activeGog?.username,
-        profileDir: getFullProfileDir(activeGog?.profileDir, 'gog'),
       });
       sendLog(`✨ [COMPLETE] Automator finished for: ${gameTitle}`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('library:updated');
+      }
       return { success: true, result };
     }
   } catch (err) {
@@ -1730,6 +2299,7 @@ async function executeAutoClaimInBackground() {
 
     if (currentFreeGames.length > 0 && epicAccounts.length > 0) {
       for (const acc of epicAccounts) {
+        if (isClaimAbortRequested) break;
         const freshHistory = loadHistory();
         const unclaimed = currentFreeGames.filter(g => !isGameClaimed(freshHistory, g, acc.id));
         if (unclaimed.length === 0) {
@@ -1739,6 +2309,10 @@ async function executeAutoClaimInBackground() {
 
         sendLog(`\n👉 Processing ${unclaimed.length} game(s) for Epic account: ${acc.username || acc.id}`);
         for (const game of unclaimed) {
+          if (isClaimAbortRequested) {
+            sendLog('🛑 Automation stopped by user.');
+            break;
+          }
           try {
             const res = await claimEpicGameNative(game, acc, {
               logger: sendLog,
@@ -1753,6 +2327,11 @@ async function executeAutoClaimInBackground() {
           }
         }
       }
+    }
+
+    if (isClaimAbortRequested) {
+      sendLog('\n🛑 [Auto-Claim] Automation aborted by user.');
+      return;
     }
 
     // 2. GOG.com (Multi-Account)
@@ -1773,12 +2352,9 @@ async function executeAutoClaimInBackground() {
         }
 
         sendLog(`\n👉 Claiming GOG giveaway "${gogGiveaway.title}" for account: ${acc.username || acc.id}`);
-        const gogRes = await claimGog({
+        const gogRes = await claimGogNative(acc, {
           headless: isHeadless,
           logger: sendLog,
-          accountId: acc.id,
-          username: acc.username,
-          profileDir: getFullProfileDir(acc.profileDir, 'gog'),
         });
         if (gogRes && gogRes.status === 'claimed') {
           claimedGames.push(`${gogGiveaway.title} (${acc.username || 'GOG'})`);

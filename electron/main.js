@@ -492,7 +492,12 @@ ipcMain.handle('store:check-auth', async (_event, opts = {}) => {
       const hasAuth = cookies.some((c) =>
         c.name === 'EPIC_BEARER_TOKEN' ||
         c.name === 'EPIC_SSO' ||
-        c.name === 'EPIC_EG1'
+        c.name === 'EPIC_EG1' ||
+        c.name === 'REFRESH_EPIC_EG1' ||
+        c.name === 'EPIC_SSO_RM' ||
+        c.name === 'EPIC_SESSION_AP' ||
+        (c.name && c.name.startsWith('EPIC_RECEIPT_')) ||
+        (c.name && c.name.startsWith('EPIC_AUTH_'))
       );
       if (hasAuth) {
         epicUser = activeEpic.username;
@@ -993,21 +998,55 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
       }
     }, 300000);
 
+    let storeHomeTicks = 0;
+    let capturedLoginName = null;
+
+    const extractEpicAccountFromCookies = (cookies) => {
+      for (const c of cookies) {
+        const val = c?.value || '';
+        if (!val.includes('.')) continue;
+        const parts = val.split('.');
+        if (parts.length < 2) continue;
+        try {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+          if (payload?.dn && typeof payload.dn === 'string') return { displayName: payload.dn };
+          if (payload?.displayName && typeof payload.displayName === 'string') return { displayName: payload.displayName };
+          if (payload?.name && typeof payload.name === 'string') return { displayName: payload.name };
+          if (payload?.sub && typeof payload.sub === 'string') return { sub: payload.sub };
+        } catch (_) {}
+      }
+      return null;
+    };
+
     const checkLoginStatus = async () => {
       if (resolved || loginWin.isDestroyed()) return;
 
       try {
-        const cookies = await ses.cookies.get({});
-        const hasAuth = cookies.some((c) =>
-          c.name === 'EPIC_BEARER_TOKEN' ||
-          c.name === 'EPIC_SSO' ||
-          c.name === 'EPIC_EG1'
-        );
-
-        if (!hasAuth) return;
-
         const currentUrl = loginWin.webContents.getURL() || '';
         const title = loginWin.getTitle() || '';
+
+        // Capture any typed email or "Welcome back" display name while on the login screen
+        if (currentUrl.includes('/id/login') || currentUrl.includes('accounts.epicgames.com')) {
+          try {
+            const seen = await loginWin.webContents.executeJavaScript(`
+              (() => {
+                const emailInput = document.querySelector('input[type="email"], input[name="email"]');
+                if (emailInput && emailInput.value && emailInput.value.includes('@')) {
+                  return emailInput.value.split('@')[0].trim();
+                }
+                const allEls = Array.from(document.querySelectorAll('*'));
+                const emailEl = allEls.find(el => el.children.length === 0 && /@.*\\./.test((el.innerText || '').trim()));
+                if (emailEl && emailEl.parentElement) {
+                  const lines = (emailEl.parentElement.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                  const nameLine = lines.find(l => !l.includes('@') && l.length > 1 && l !== 'Welcome back');
+                  if (nameLine) return nameLine;
+                }
+                return null;
+              })()
+            `).catch(() => null);
+            if (seen) capturedLoginName = seen;
+          } catch (_) {}
+        }
 
         // Auto-click "Welcome back" card if present during sign in flow
         const isWelcomeBack = currentUrl.includes('/id/login') ||
@@ -1030,42 +1069,125 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
                             (currentUrl.includes('epicgames.com') && !isAuthFlow);
         if (!isStoreHome) return;
 
-        // Try to fetch authentic Epic display name from DOM or session
+        const cookies = await ses.cookies.get({});
+        const hasAuth = cookies.some((c) =>
+          c.name === 'EPIC_BEARER_TOKEN' ||
+          c.name === 'EPIC_SSO' ||
+          c.name === 'EPIC_EG1' ||
+          c.name === 'REFRESH_EPIC_EG1' ||
+          c.name === 'EPIC_SSO_RM' ||
+          c.name === 'EPIC_SESSION_AP' ||
+          (c.name && c.name.startsWith('EPIC_RECEIPT_')) ||
+          (c.name && c.name.startsWith('EPIC_AUTH_'))
+        );
+
+        if (!hasAuth) return;
+
+        storeHomeTicks++;
+
+        // Allow storefront SPA 1 tick (~1.5s) after redirect to finish background SSO handshake
+        if (storeHomeTicks < 2) return;
+
+        // 1. Try to fetch authentic Epic display name from DOM (including Shadow DOM & egs-navigation properties)
         let displayName = null;
+        let domLoggedIn = false;
         try {
-          displayName = await loginWin.webContents.executeJavaScript(`
+          const domInfo = await loginWin.webContents.executeJavaScript(`
             (() => {
               const nav = document.querySelector('egs-navigation');
               if (nav) {
-                const loggedIn = nav.getAttribute('isloggedin') === 'true';
-                const name = nav.getAttribute('displayname');
-                if (loggedIn && name && name !== 'null') return name;
+                const loggedInAttr = nav.getAttribute('isloggedin') === 'true' || nav.isLoggedIn === true;
+                const name = nav.getAttribute('displayname') || nav.getAttribute('data-displayname') || nav.displayName;
+                if (name && name !== 'null' && name !== 'undefined' && String(name).trim()) {
+                  return { displayName: String(name).trim(), isLoggedIn: true };
+                }
+                if (nav.shadowRoot) {
+                  const shadowUser = nav.shadowRoot.querySelector('[data-testid="user-dropdown"], .user-name, [class*="displayName"], [class*="user"]');
+                  if (shadowUser && (shadowUser.textContent || '').trim()) {
+                    const txt = shadowUser.textContent.trim();
+                    if (txt.toLowerCase() !== 'sign in' && txt.toLowerCase() !== 'download') {
+                      return { displayName: txt, isLoggedIn: true };
+                    }
+                  }
+                }
+                if (loggedInAttr) {
+                  return { displayName: null, isLoggedIn: true };
+                }
               }
               const dropdown = document.querySelector('[data-testid="user-dropdown"]');
-              if (dropdown && dropdown.innerText.trim()) return dropdown.innerText.trim();
+              if (dropdown && dropdown.innerText.trim()) {
+                return { displayName: dropdown.innerText.trim(), isLoggedIn: true };
+              }
               return null;
             })()
-          `);
+          `).catch(() => null);
+          if (domInfo?.displayName) displayName = domInfo.displayName;
+          if (domInfo?.isLoggedIn) domLoggedIn = true;
         } catch {}
 
+        // 2. Use main-process ses.fetch (bypasses CORS between store.epicgames.com and www.epicgames.com!)
         if (!displayName) {
           try {
-            const accData = await loginWin.webContents.executeJavaScript(`
-              fetch('https://www.epicgames.com/id/api/account', { credentials: 'include' })
-                .then(r => r.ok ? r.json() : null)
-                .catch(() => null)
-            `);
-            if (accData && accData.displayName && accData.displayName.trim()) {
-              displayName = accData.displayName.trim();
+            const accRes = await ses.fetch('https://www.epicgames.com/id/api/account', {
+              headers: { Accept: 'application/json' },
+            });
+            if (accRes.ok) {
+              const accData = await accRes.json().catch(() => null);
+              if (accData?.displayName?.trim()) {
+                displayName = accData.displayName.trim();
+              } else if (accData?.email?.trim()) {
+                displayName = accData.email.split('@')[0].trim();
+              }
             }
           } catch {}
         }
 
-        // Only complete once confirmed on store page with genuine user identity
+        // 3. Fallback: try /id/api/authenticate then /id/api/account via ses.fetch
+        if (!displayName) {
+          try {
+            await ses.fetch('https://www.epicgames.com/id/api/authenticate', {
+              headers: { Accept: 'application/json' },
+            }).catch(() => {});
+            const accRes2 = await ses.fetch('https://www.epicgames.com/id/api/account', {
+              headers: { Accept: 'application/json' },
+            });
+            if (accRes2.ok) {
+              const accData2 = await accRes2.json().catch(() => null);
+              if (accData2?.displayName?.trim()) {
+                displayName = accData2.displayName.trim();
+              } else if (accData2?.email?.trim()) {
+                displayName = accData2.email.split('@')[0].trim();
+              }
+            }
+          } catch {}
+        }
+
+        // 4. Fallback: check JWT claims on REFRESH_EPIC_EG1 / EPIC_RECEIPT_* / EPIC_EG1 cookies
+        const hasStoreToken = cookies.some((c) =>
+          c.name === 'REFRESH_EPIC_EG1' ||
+          c.name === 'EPIC_EG1' ||
+          c.name === 'EPIC_BEARER_TOKEN' ||
+          c.name === 'EPIC_SSO' ||
+          (c.name && c.name.startsWith('EPIC_RECEIPT_'))
+        );
+        const jwtInfo = extractEpicAccountFromCookies(cookies);
+        if (!displayName && jwtInfo?.displayName) {
+          displayName = jwtInfo.displayName;
+        }
+
+        // 5. If confirmed on store with store tokens (or DOM logged in) after 2+ ticks, use captured login name or account ID
+        if (!displayName && (hasStoreToken || domLoggedIn) && storeHomeTicks >= 2) {
+          displayName =
+            capturedLoginName ||
+            (jwtInfo?.sub ? `Epic_${jwtInfo.sub.slice(0, 6)}` : 'Epic Account');
+        }
+
+        // Complete once confirmed on store page with user identity
         if (displayName) {
           resolved = true;
           cleanup();
 
+          const freshCookies = await ses.cookies.get({});
           const username = displayName;
           console.log(`✅ Epic Games authentication confirmed for: ${username}`);
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1073,7 +1195,7 @@ async function openEpicLoginWindow({ accountId, relPath, fullPath, isNew = false
           }
 
           // Format cookies for Playwright persistent context
-          const playwrightCookies = cookies.map((c) => ({
+          const playwrightCookies = freshCookies.map((c) => ({
             name: c.name,
             value: c.value,
             domain: c.domain,
@@ -1181,37 +1303,49 @@ let activeGogLoginWindow = null;
 async function hydrateGogSession(ses, account) {
   configureSessionStealth(ses);
   try {
+    const nowSec = Math.floor(Date.now() / 1000);
     await ses.cookies.set({
       url: 'https://www.gog.com/',
       name: 'CookieConsent',
       value: '{stamp:%274oR8MJL+bxVlG6g+kl2we5+suMJ+Tv7I4C5d4k+YY4vrnhCD+P23RQ==%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true%2Cmethod:%27explicit%27%2Cver:1%2Cutc:1672331618201%2Cregion:%27de%27}',
-      domain: 'www.gog.com',
       path: '/',
-      expirationDate: Math.floor(Date.now() / 1000) + 31536000,
+      expirationDate: nowSec + 31536000,
     }).catch(() => {});
 
     const profileDir = account?.profileDir ? getFullProfileDir(account.profileDir, 'gog') : null;
     const cookiesPath = profileDir ? path.join(profileDir, 'cookies.json') : null;
     if (cookiesPath && fs.existsSync(cookiesPath)) {
-      const existingCookies = await ses.cookies.get({ domain: 'gog.com' });
-      const hasAuth = existingCookies.some(c => c.name === 'gog_us' || c.name === 'gog_lc' || c.name === 'login-token');
+      const existingCookies = await ses.cookies.get({});
+      // Note: gog_lc is merely locale/currency (set for guests too) — only check genuine auth cookies!
+      const hasAuth = existingCookies.some(
+        c =>
+          (c.name === 'gog_us' || c.name === 'gog-al' || c.name === 'galaxy-login-s' || c.name === 'galaxy-login-al' || c.name === 'login-token') &&
+          (!c.expirationDate || c.expirationDate > nowSec)
+      );
       if (!hasAuth) {
         const raw = fs.readFileSync(cookiesPath, 'utf-8');
         const diskCookies = JSON.parse(raw);
         for (const c of diskCookies) {
-          const cookieDomain = c.domain ? (c.domain.startsWith('.') ? c.domain.slice(1) : c.domain) : 'gog.com';
+          if (!c.name) continue;
+          if (c.expires && c.expires > 0 && c.expires < nowSec) continue;
+
+          const isDomainCookie = c.domain && c.domain.startsWith('.');
+          const cookieDomain = c.domain ? (isDomainCookie ? c.domain.slice(1) : c.domain) : 'gog.com';
           const cookieUrl = `${c.secure ? 'https' : 'http'}://${cookieDomain}${c.path || '/'}`;
-          await ses.cookies.set({
+          const details = {
             url: cookieUrl,
             name: c.name,
             value: c.value,
-            domain: c.domain,
             path: c.path || '/',
             secure: !!c.secure,
             httpOnly: !!c.httpOnly,
             sameSite: c.sameSite === 'Strict' ? 'strict' : (c.sameSite === 'None' || c.sameSite === 'no_restriction' ? 'no_restriction' : 'lax'),
-            expirationDate: c.expires > 0 ? c.expires : (Math.floor(Date.now() / 1000) + 31536000),
-          }).catch(() => {});
+            expirationDate: c.expires > 0 ? c.expires : (nowSec + 31536000),
+          };
+          if (isDomainCookie) {
+            details.domain = c.domain;
+          }
+          await ses.cookies.set(details).catch(() => {});
         }
         await ses.cookies.flushStore().catch(() => {});
       }
@@ -1441,14 +1575,21 @@ async function openGogLoginWindow({ accountId, relPath, fullPath, isNew = false 
 
 /**
  * Claims current active GOG giveaway using native Electron session & BrowserWindow.
+ * Automatically refreshes expired 24h gog_us sessions via login.gog.com SSO or prompts
+ * sign-in directly inside the native window if the profile session expired.
  */
 async function claimGogNative(account, { headless = true, logger = console.log } = {}) {
   logger('\n========================================');
   logger('🎮 [GOG.COM] Checking for Giveaways...');
 
   const targetId = account?.id || 'default';
-  const ses = session.fromPartition(`persist:gog_${targetId}`);
-  await hydrateGogSession(ses, account);
+  const targetRelPath = account?.profileDir || (targetId === 'default' ? '.profile-gog' : path.join('.profiles', 'gog', targetId));
+  const targetFullPath = getFullProfileDir(targetRelPath, 'gog');
+  fs.mkdirSync(targetFullPath, { recursive: true });
+
+  const partitionName = `persist:gog_${targetId}`;
+  const ses = session.fromPartition(partitionName);
+  await hydrateGogSession(ses, { id: targetId, profileDir: targetRelPath, username: account?.username });
 
   const giveaway = await getGogGiveawayFastOrBrowser().catch(() => ({ active: false }));
   if (!giveaway?.active) {
@@ -1458,15 +1599,7 @@ async function claimGogNative(account, { headless = true, logger = console.log }
 
   logger(`🎁 Active GOG Giveaway detected: "${giveaway.title}"`);
 
-  const alreadyOwned = giveaway.isAlreadyClaimed || await isGameInGogLibraryNative(giveaway.title, account);
-  if (alreadyOwned) {
-    logger(`✅ "${giveaway.title}" is already in your GOG library!`);
-    const history = loadHistory();
-    recordClaim(history, { id: `gog_${giveaway.title}`, title: giveaway.title, slug: 'gog' }, 'in_library', targetId, account?.username);
-    return { status: 'already_claimed', title: giveaway.title };
-  }
-
-  // Verify GOG authentication
+  // 1. Check fast session auth via userData.json
   let gogUsername = null;
   try {
     const userRes = await ses.fetch('https://www.gog.com/userData.json');
@@ -1478,14 +1611,154 @@ async function claimGogNative(account, { headless = true, logger = console.log }
     }
   } catch (_) {}
 
+  // 2. If fast userData.json reports logged out (e.g. 24h gog_us cookie expired or legacy Playwright profile),
+  // open a native BrowserWindow to auto-exchange gog-al / galaxy-login-al on login.gog.com or let the user sign in.
   if (!gogUsername) {
-    logger('⚠️ Found GOG giveaway, but you are not signed into GOG.');
-    logger('👉 Click "Connect" next to GOG to sign into your GOG account.');
+    logger(`🔄 Verifying / refreshing GOG session for "${account?.username || targetId}"...`);
+    gogUsername = await new Promise((resolve) => {
+      let settled = false;
+      let pollTimer = null;
+      let timeoutTimer = null;
+      let ticks = 0;
+      let promptedUser = false;
+
+      const gogWin = new BrowserWindow({
+        width: 560,
+        height: 740,
+        minWidth: 440,
+        minHeight: 600,
+        title: `GOG.com Session (${account?.username || targetId}) - Claimr`,
+        show: !headless,
+        autoHideMenuBar: true,
+        webPreferences: {
+          partition: partitionName,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          backgroundThrottling: false,
+        },
+      });
+
+      const cleanupWin = () => {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        if (activeClaimWindow === gogWin) activeClaimWindow = null;
+        if (activeClaimFinish === finishWin) activeClaimFinish = null;
+      };
+
+      const finishWin = (usernameResult) => {
+        if (settled) return;
+        settled = true;
+        cleanupWin();
+        try {
+          if (!gogWin.isDestroyed()) {
+            gogWin.close();
+          }
+        } catch (_) {}
+        resolve(typeof usernameResult === 'string' ? usernameResult : null);
+      };
+
+      activeClaimWindow = gogWin;
+      activeClaimFinish = () => finishWin(null);
+
+      gogWin.on('closed', () => {
+        cleanupWin();
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      });
+
+      timeoutTimer = setTimeout(() => {
+        finishWin(null);
+      }, 180000);
+
+      pollTimer = setInterval(async () => {
+        if (settled || gogWin.isDestroyed() || isClaimAbortRequested) {
+          return finishWin(null);
+        }
+        ticks++;
+
+        try {
+          const currentUrl = gogWin.webContents.getURL() || '';
+          const isLoginPage = currentUrl.includes('login.gog.com') || currentUrl.includes('/auth?');
+
+          // Check if userData.json now reports logged in
+          if (!isLoginPage) {
+            const res = await ses.fetch('https://www.gog.com/userData.json');
+            if (res.ok) {
+              const data = await res.json().catch(() => null);
+              if (data && data.isLoggedIn && data.username) {
+                const uname = data.username.trim();
+                const cookies = await ses.cookies.get({});
+                const formatted = cookies.map((c) => ({
+                  name: c.name,
+                  value: c.value,
+                  domain: c.domain,
+                  path: c.path,
+                  expires: c.expirationDate ? Math.floor(c.expirationDate) : -1,
+                  httpOnly: !!c.httpOnly,
+                  secure: !!c.secure,
+                  sameSite: c.sameSite === 'no_restriction' ? 'None' : (c.sameSite === 'strict' ? 'Strict' : 'Lax'),
+                }));
+                fs.writeFileSync(path.join(targetFullPath, 'cookies.json'), JSON.stringify(formatted, null, 2), 'utf-8');
+                await ses.cookies.flushStore().catch(() => {});
+                registerAccount('gog', {
+                  id: targetId,
+                  username: uname,
+                  profileDir: targetRelPath,
+                });
+                return finishWin(uname);
+              }
+            }
+          }
+
+          // If still on login.gog.com after 2 ticks (~3s), the auto-login token expired — show the window so the user can log in right now!
+          if (isLoginPage && ticks >= 2 && !promptedUser) {
+            promptedUser = true;
+            if (!gogWin.isVisible()) {
+              gogWin.show();
+              gogWin.focus();
+            }
+            logger(`🔑 GOG session for "${account?.username || targetId}" requires sign-in. Please sign in to the GOG window to claim "${giveaway.title}"...`);
+            sendNotification('Claimr - GOG Sign-In Needed 🔑', `Please sign into GOG (${account?.username || 'account'}) in the window to claim "${giveaway.title}".`);
+          }
+        } catch (_) {}
+      }, 1500);
+
+      const gogLoginUrl = 'https://login.gog.com/auth?client_id=46755278331571209&layout=default&brand=gog&response_type=code&redirect_uri=https%3A%2F%2Fwww.gog.com%2Fon_login_success%3FreturnTo%3D%2Fen';
+      gogWin.loadURL(gogLoginUrl).catch(() => finishWin(null));
+    });
+  }
+
+  if (isClaimAbortRequested) {
+    logger('🛑 GOG claim stopped by user.');
+    return { status: 'cancelled', title: giveaway.title };
+  }
+
+  if (!gogUsername) {
+    logger('⚠️ GOG sign-in was not completed.');
     return { status: 'unauthorized', title: giveaway.title };
   }
 
   logger(`👤 Signed into GOG as: ${gogUsername}`);
-  logger('👉 Claiming GOG giveaway...');
+
+  // Check if already in library after authenticating
+  const alreadyOwned = giveaway.isAlreadyClaimed || await isGameInGogLibraryNative(giveaway.title, { id: targetId, profileDir: targetRelPath, username: gogUsername });
+  if (alreadyOwned) {
+    logger(`✅ "${giveaway.title}" is already in your GOG library!`);
+    const history = loadHistory();
+    recordClaim(history, { id: `gog_${giveaway.title}`, title: giveaway.title, slug: 'gog' }, 'in_library', targetId, gogUsername);
+    return { status: 'already_claimed', title: giveaway.title };
+  }
+
+  logger(`👉 Claiming GOG giveaway "${giveaway.title}"...`);
 
   try {
     let claimRes = await ses.fetch('https://www.gog.com/giveaway/claim', {
@@ -1621,7 +1894,14 @@ async function claimEpicGameNative(game, account, { logger = console.log, isHead
     const cookiesPath = profileDir ? path.join(profileDir, 'cookies.json') : null;
     if (cookiesPath && fs.existsSync(cookiesPath)) {
       const existingCookies = await ses.cookies.get({ domain: 'epicgames.com' });
-      const hasAuth = existingCookies.some(c => c.name === 'EPIC_BEARER_TOKEN' || c.name === 'EPIC_SSO' || c.name === 'EPIC_EG1');
+      const hasAuth = existingCookies.some((c) =>
+        c.name === 'EPIC_BEARER_TOKEN' ||
+        c.name === 'EPIC_SSO' ||
+        c.name === 'EPIC_EG1' ||
+        c.name === 'REFRESH_EPIC_EG1' ||
+        c.name === 'EPIC_SSO_RM' ||
+        (c.name && c.name.startsWith('EPIC_RECEIPT_'))
+      );
       if (!hasAuth) {
         const raw = fs.readFileSync(cookiesPath, 'utf-8');
         const diskCookies = JSON.parse(raw);
